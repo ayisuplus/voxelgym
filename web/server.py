@@ -60,6 +60,7 @@ class Sim:
         self.losses = 0
         self.results = deque(maxlen=48)  # per-episode {ep, ok, reward}
         self.last_result = None
+        self.hold = 0  # terminal-frame hold countdown
         self.cam_yaw = None  # smoothed chase-cam yaw
         self.env = None
         self.expert = None
@@ -74,6 +75,7 @@ class Sim:
         self.env.reset(seed=seed)
         self.expert = make_expert(self.task_name, self.task, seed=seed)
         self.ep_reward = 0.0
+        self.cam_yaw = None  # no cross-episode camera swing
 
     def action(self, world) -> dict:
         if self.policy == "expert":
@@ -87,7 +89,15 @@ class Sim:
                     (5, 2, 2, 24, 9, 2, 2, 2, 9, 8))}
 
     def run_frames(self):
-        """Advance `speed` ticks; auto-reset on episode end."""
+        """Advance `speed` ticks. On episode end: HOLD the terminal frame
+        (~3 s) so viewers see the success state — the old code reset
+        instantly and the climax frame was never shown — then reset."""
+        if self.hold > 0:
+            self.hold -= 1
+            if self.hold == 0:
+                self.episode += 1
+                self.reset_episode(self.seed + 1)
+            return
         for _ in range(self.speed):
             a = self.action(self.env.world)
             self.last_action = a
@@ -100,8 +110,7 @@ class Sim:
                 self.results.append(
                     {"ep": self.episode, "ok": bool(ok), "reward": round(self.ep_reward, 2)})
                 self.last_result = self.results[-1]
-                self.episode += 1
-                self.reset_episode(self.seed + 1)
+                self.hold = 45  # frames at 15 fps
                 break
 
     def hud(self, last_action: dict | None) -> dict:
@@ -123,6 +132,7 @@ class Sim:
             "ep_reward": round(self.ep_reward, 3),
             "results": list(self.results),
             "last_result": self.last_result,
+            "holding": self.hold > 0,
             "cam_yaw": self.cam_yaw,
             "action": last_action or {},
             "stage": stage,
@@ -145,7 +155,11 @@ def build_packet(sim: Sim, hud: dict) -> bytes:
     if sim.cam_yaw is None:
         sim.cam_yaw = yaw
     dyaw = ((yaw - sim.cam_yaw + 180.0) % 360.0) - 180.0
-    sim.cam_yaw = (sim.cam_yaw + dyaw * 0.3) % 360.0
+    if abs(dyaw) > 60.0:
+        sim.cam_yaw = yaw  # snap on fast spins: lagging behind would fling
+        # the agent out of the frustum (the "teleporting avatar" glitch)
+    else:
+        sim.cam_yaw = (sim.cam_yaw + dyaw * 0.3) % 360.0
     cy = math.radians(sim.cam_yaw)
     eye = (x + math.sin(cy) * 4.0, y + 3.2, z - math.cos(cy) * 4.0)
     chase, _, _ = w.render_pose(eye, sim.cam_yaw, 25.0)

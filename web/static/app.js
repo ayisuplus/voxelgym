@@ -116,16 +116,19 @@ function drawBars(results) {
     ctxBars.fillRect(x, H - 4 - bh, bw, bh);
   });
 }
-let lastEp = -1, bannerTimer = null;
+let lastResultEp = null, bannerTimer = null;
 function showBanner(h) {
-  if (h.episode === lastEp || !h.last_result) return;
-  lastEp = h.episode;
+  // fires when a NEW result lands — during the terminal-frame hold, so the
+  // banner overlays the actual success/failure scene, not the next episode
+  const r = h.last_result;
+  if (!r || r.ep === lastResultEp) return;
+  if (lastResultEp === null) { lastResultEp = r.ep; return; } // stale on connect
+  lastResultEp = r.ep;
   const b = $("banner");
-  const ok = h.last_result.ok;
-  b.className = `banner show ${ok ? "win" : "fail"}`;
-  b.textContent = `episode ${h.last_result.ep} — ${ok ? "SUCCESS" : "FAILED"}  ${h.last_result.reward > 0 ? "+" : ""}${h.last_result.reward}`;
+  b.className = `banner show ${r.ok ? "win" : "fail"}`;
+  b.textContent = `episode ${r.ep} — ${r.ok ? "SUCCESS" : "FAILED"}  ${r.reward > 0 ? "+" : ""}${r.reward}`;
   clearTimeout(bannerTimer);
-  bannerTimer = setTimeout(() => b.classList.remove("show"), 1400);
+  bannerTimer = setTimeout(() => b.classList.remove("show"), 2600);
 }
 
 /* --- hud --- */
