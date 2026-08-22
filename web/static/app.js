@@ -2,7 +2,8 @@
  * [u32 LE header_len][header JSON (4-padded)][rgb 128*128*3]
  * [chase 128*128*3][seg 128*128 u16][lidar 16*256 f32]            */
 
-const RES = 128, LIDAR_C = 16, LIDAR_A = 256;
+const LIDAR_C = 16, LIDAR_A = 256;
+let RES = 256;              // follows the server's render resolution
 let palette = null;
 const SKY = [0x78, 0xA6, 0xFF];
 
@@ -14,10 +15,20 @@ const ctxSeg = $("seg").getContext("2d");
 const ctxLidar = $("lidar").getContext("2d");
 const ctxBars = $("bars").getContext("2d");
 
-const imgView = ctxView.createImageData(RES, RES);
-const imgChase = ctxChase.createImageData(RES, RES);
-const imgSeg = ctxSeg.createImageData(RES, RES);
+let imgView, imgChase, imgSeg;
 const imgLidar = ctxLidar.createImageData(LIDAR_A, LIDAR_C);
+function setRes(r) {
+  if (r === RES && imgView) return;
+  RES = r;
+  for (const [c, ctx] of [["view", ctxView], ["chase", ctxChase], ["seg", ctxSeg]]) {
+    $(c).width = r; $(c).height = r;
+    ctx.imageSmoothingEnabled = false;
+  }
+  imgView = ctxView.createImageData(r, r);
+  imgChase = ctxChase.createImageData(r, r);
+  imgSeg = ctxSeg.createImageData(r, r);
+}
+setRes(RES);
 
 /* --- channel painters --- */
 function expand(bytes, off) {
@@ -91,8 +102,7 @@ function drawAvatar(chase) {
   const px = (xc / zc + 1) * RES / 2;          // fov 90 -> half = 1
   const py = (1 - yc / zc) * RES / 2;
   const h = (1.8 / zc) * RES / 2;              // agent is 1.8 tall
-  const w = (0.62 / zc) * RES / 2;
-  // body + head: simple steve-like figure (annotation layer, not sim truth)
+  const w = (0.62 / zc) * RES / 2;  // body + head: simple steve-like figure (annotation layer, not sim truth)
   ctxChase.fillStyle = "#e06030";
   ctxChase.fillRect(px - w / 2, py - h * 0.18, w, h * 0.68);         // body
   ctxChase.fillStyle = "#e0b080";
@@ -177,6 +187,7 @@ function connect() {
     const buf = ev.data;
     const hlen = new DataView(buf, 0, 4).getUint32(0, true);
     const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hlen)));
+    if (head.res) setRes(head.res);
     let off = 4 + hlen;
     putRgb(ctxView, imgView, buf, off); off += RES * RES * 3;
     putRgb(ctxChase, imgChase, buf, off); off += RES * RES * 3;
@@ -222,6 +233,7 @@ speed.oninput = () => {
   $("speedv").textContent = speed.value;
   send({ cmd: "set_speed", speed: +speed.value });
 };
+$("quality").onchange = (e) => send({ cmd: "set_quality", q: +e.target.value });
 $("policy").onchange = (e) => send({ cmd: "set_policy", policy: e.target.value });
 $("pause").onclick = (e) => {
   const paused = e.target.textContent.includes("resume");

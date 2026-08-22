@@ -12,8 +12,8 @@ main { display:flex; gap:20px; padding:18px 20px; align-items:flex-start; }
 figure { margin:0; background:#171b23; padding:10px; border-radius:10px; }
 figcaption { color:#8494a7; font-size:12px; margin-top:6px; text-align:center; }
 canvas { image-rendering:pixelated; display:block; background:#000; border-radius:4px; }
-#chase { width:520px; height:520px; }
-#lidar { width:520px; height:65px; }
+#chase { width:512px; height:512px; }   /* 512/res is always an integer */
+#lidar { width:512px; height:64px; }    /* 2x/4x of the 256x16 backing */
 
 .banner {
   position:absolute; left:50%; top:38px; transform:translateX(-50%);
@@ -27,7 +27,7 @@ canvas { image-rendering:pixelated; display:block; background:#000; border-radiu
 aside { width:330px; background:#171b23; border-radius:10px; padding:12px; }
 .row2 { display:flex; gap:10px; margin-bottom:10px; }
 .row2 figure { padding:6px; }
-.row2 canvas { width:138px; height:138px; }
+.row2 canvas { width:128px; height:128px; }  /* exact 1x / 0.5x / 0.25x */
 #hud { font:12px/1.55 ui-monospace, monospace; white-space:pre-wrap; background:#101318; border-radius:6px; padding:8px 10px; }
 #bars { width:100%; background:#101318; border-radius:6px; margin-top:10px; }
 .controls { margin-top:12px; display:flex; flex-direction:column; gap:9px; }

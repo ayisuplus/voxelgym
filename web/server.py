@@ -64,6 +64,7 @@ class Sim:
         self.speed = 2  # sim ticks per displayed frame (low = watchable)
         self.paused = False
         self.policy = "expert"
+        self.res = 256  # internal render resolution (128/256/512)
         self.episode = 0
         self.wins = 0
         self.losses = 0
@@ -161,10 +162,12 @@ CLIENTS: set[WebSocket] = set()
 
 def build_packet(sim: Sim, hud: dict) -> bytes:
     w = sim.env.world
-    rgb, _, seg = w.render()
+    r = sim.res
+    hud["res"] = r
+    x, y, z, yaw, pitch, _ = (float(v) for v in w.obs_pose())
+    rgb, _, seg = w.render_pose((x, y + 1.62, z), yaw, pitch, width=r, height=r)
     # chase cam: 4 cells behind (MC fwd = (-sin yaw, 0, cos yaw)), 3.2 up;
     # yaw smoothed toward the agent's heading so turns don't snap
-    x, y, z, yaw = (float(v) for v in w.obs_pose()[:4])
     if sim.cam_yaw is None:
         sim.cam_yaw = yaw
     dyaw = ((yaw - sim.cam_yaw + 180.0) % 360.0) - 180.0
@@ -175,7 +178,7 @@ def build_packet(sim: Sim, hud: dict) -> bytes:
         sim.cam_yaw = (sim.cam_yaw + dyaw * 0.3) % 360.0
     cy = math.radians(sim.cam_yaw)
     eye = (x + math.sin(cy) * 4.0, y + 3.2, z - math.cos(cy) * 4.0)
-    chase, _, _ = w.render_pose(eye, sim.cam_yaw, 25.0)
+    chase, _, _ = w.render_pose(eye, sim.cam_yaw, 25.0, width=r, height=r)
     hud["chase"] = {
         "eye": [round(v, 3) for v in eye],
         "yaw": round(sim.cam_yaw, 2),
@@ -247,6 +250,8 @@ def apply_cmd(msg: dict):
         SIM.paused = False
     elif cmd == "reset":
         SIM.reset_episode(SIM.seed)
+    elif cmd == "set_quality":
+        SIM.res = {1: 128, 2: 256, 4: 512}.get(int(msg["q"]), 256)
     elif cmd == "set_policy":
         if msg["policy"] in ("expert", "random"):
             SIM.policy = msg["policy"]
