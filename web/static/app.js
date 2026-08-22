@@ -146,13 +146,13 @@ function show(h) {
     `reward   ${h.ep_reward}\n` +
     `stage    ${h.stage || "-"}\n` +
     `action   ${fmtAction(h.action)}\n` +
-    `policy   ${h.policy}${h.paused ? "  [PAUSED]" : ""}   speed ${h.speed}`;
+    `policy   ${h.policy}${h.paused ? "  [PAUSED]" : ""}   speed ${h.speed}${h.showcase ? "   ✨ showcase" : ""}`;
   drawBars(h.results);
   showBanner(h);
   const taskSel = $("task");
-  if (document.activeElement !== taskSel && taskSel.value !== h.task) {
-    taskSel.value = h.task;
-    showDesc();
+  if (document.activeElement !== taskSel) {
+    const want = h.showcase ? "__showcase__" : h.task;
+    if (taskSel.value !== want) { taskSel.value = want; showDesc(); }
   }
   const seedIn = $("seed");
   if (document.activeElement !== seedIn && +seedIn.value !== h.seed) seedIn.value = h.seed;
@@ -192,17 +192,30 @@ connect();
 const send = (m) => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
 const taskSel = $("task");
 let taskDescs = {};
-function showDesc() { $("taskdesc").textContent = taskDescs[taskSel.value] || ""; }
+function showDesc() {
+  $("taskdesc").textContent =
+    taskSel.value === "__showcase__"
+      ? "cycles through 10 tasks, one episode each — the full curriculum"
+      : (taskDescs[taskSel.value] || "");
+}
 fetch("/api/tasks").then(r => r.json()).then(({ tasks }) => {
+  const sc = document.createElement("option");
+  sc.value = "__showcase__"; sc.textContent = "✨ showcase (cycle all)";
+  taskSel.appendChild(sc);
   for (const t of tasks) {
     const o = document.createElement("option");
     o.value = t.name; o.textContent = t.name;
     taskSel.appendChild(o);
     taskDescs[t.name] = t.desc;
   }
+  taskSel.value = "__showcase__";
   showDesc();
 });
-taskSel.onchange = () => { send({ cmd: "set_task", task: taskSel.value }); showDesc(); };
+taskSel.onchange = () => {
+  if (taskSel.value === "__showcase__") send({ cmd: "set_showcase", on: true });
+  else send({ cmd: "set_task", task: taskSel.value });
+  showDesc();
+};
 $("seed").onchange = (e) => send({ cmd: "set_seed", seed: +e.target.value });
 const speed = $("speed");
 speed.oninput = () => {

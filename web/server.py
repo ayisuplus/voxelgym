@@ -46,11 +46,20 @@ LIDAR = {"channels": 16, "azimuth": 256, "min_elev": -20.0, "max_elev": 10.0,
 FPS = 15
 
 
+SHOWCASE = [
+    "tnt_clear", "logic_probe", "bridge_over_lava", "collapse_judge",
+    "buried_escape", "firebreak_judge", "circuit_door_two",
+    "craft_stone_pickaxe", "smelt_iron", "navigate_to_target",
+]
+
+
 class Sim:
     """Owns the env + policy. Mutated only from the asyncio loop."""
 
     def __init__(self):
-        self.task_name = "navigate_to_target"
+        self.task_name = SHOWCASE[0]
+        self.showcase = True  # cycle one episode per task (demo mode)
+        self.show_idx = 0
         self.seed = 0
         self.speed = 2  # sim ticks per displayed frame (low = watchable)
         self.paused = False
@@ -96,6 +105,9 @@ class Sim:
             self.hold -= 1
             if self.hold == 0:
                 self.episode += 1
+                if self.showcase:
+                    self.show_idx = (self.show_idx + 1) % len(SHOWCASE)
+                    self.task_name = SHOWCASE[self.show_idx]
                 self.reset_episode(self.seed + 1)
             return
         for _ in range(self.speed):
@@ -122,6 +134,7 @@ class Sim:
             stage = f"{idx}: {stages[idx].name}"
         return {
             "task": self.task_name,
+            "showcase": self.showcase,
             "seed": self.seed,
             "episode": self.episode,
             "wins": self.wins,
@@ -215,8 +228,15 @@ def apply_cmd(msg: dict):
     if cmd == "set_task":
         name = msg["task"]
         if name in task_names():
+            SIM.showcase = False
             SIM.task_name = name
             SIM.reset_episode(int(msg.get("seed", SIM.seed)))
+    elif cmd == "set_showcase":
+        SIM.showcase = bool(msg.get("on", True))
+        if SIM.showcase:
+            SIM.show_idx = 0
+            SIM.task_name = SHOWCASE[0]
+            SIM.reset_episode(SIM.seed)
     elif cmd == "set_seed":
         SIM.reset_episode(int(msg["seed"]))
     elif cmd == "set_speed":
