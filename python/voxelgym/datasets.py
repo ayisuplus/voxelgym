@@ -1,0 +1,139 @@
+"""Action-conditioned video dataset: export (via scripted experts + Recorder)
+and a torch loader.
+
+CLI:
+  python -m voxelgym.datasets export --task collect_log --episodes 50 --render 1 --out data/v1
+  python -m voxelgym.datasets baseline --data data/v1
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+
+import numpy as np
+import pyarrow.parquet as pq
+
+from .env import ACTION_KEYS
+
+FRAME = 128
+
+
+def export(task: str, episodes: int, out_dir: str, render: int = 1, seed0: int = 0, epsilon: float = 0.0):
+    from .experts import run_episode
+
+    os.makedirs(out_dir, exist_ok=True)
+    wins = 0
+    for i in range(episodes):
+        ok, steps, h, path = run_episode(task, seed0 + i, record_dir=out_dir, render=bool(render), epsilon=epsilon)
+        wins += ok
+        print(f"  ep {i}: {'OK' if ok else 'fail'} {steps} ticks -> {os.path.basename(path or '')}", flush=True)
+    print(f"exported {episodes} episodes of {task} to {out_dir} (expert success {wins}/{episodes})")
+
+
+def _decode_frames(rows, key, shape, dtype):
+    if rows[0][key] is None:
+        return None
+    return np.stack([np.frombuffer(row[key], dtype=dtype).reshape(shape) for row in rows])
+
+
+class VoxelSequenceDataset:
+    """torch Dataset over recorded episodes: 16-frame slices ->
+    (rgb, action, depth, seg). Decodes lazily per episode with a one-shard
+    cache (episodes are ~20-60 MB decoded).
+    """
+
+    def __init__(self, data_dir: str, seq_len: int = 16, split: str = "train", test_frac: float = 0.1):
+        import torch  # noqa: F401  (torch Dataset protocol without hard dep at import)
+        from torch.utils.data import Dataset  # noqa: F401
+        shards = sorted(glob.glob(os.path.join(data_dir, "*.parquet")))
+        assert shards, f"no parquet shards in {data_dir}"
+        n_test = max(1, int(round(len(shards) * test_frac)))
+        if split == "test":
+            self.shards = shards[:n_test]
+        else:
+            self.shards = shards[n_test:] if len(shards) > n_test else shards
+        self.seq_len = seq_len
+        self._lengths: list[int] = []
+        for s in self.shards:
+            n = pq.read_metadata(s).num_rows
+            self._lengths.append(max(0, n - seq_len + 1))
+        self._cum = np.cumsum([0] + self._lengths)
+        self._cache_idx = -1
+        self._cache = None
+
+    def __len__(self):
+        return int(self._cum[-1])
+
+    def _load(self, shard_idx: int):
+        if self._cache_idx == shard_idx:
+            return self._cache
+        table = pq.read_table(self.shards[shard_idx])
+        rows = table.to_pylist()
+        rgb = _decode_frames(rows, "rgb", (FRAME, FRAME, 3), np.uint8)
+        if rgb is None:
+            raise ValueError(f"{self.shards[shard_idx]} has no rgb frames (export without render?)")
+        depth = _decode_frames(rows, "depth", (FRAME, FRAME), np.float16)
+        seg = _decode_frames(rows, "seg", (FRAME, FRAME), np.uint16)
+        actions = np.stack([[r[k] for k in ACTION_KEYS] for r in rows]).astype(np.uint8)
+        self._cache = (rgb, actions, depth, seg)
+        self._cache_idx = shard_idx
+        return self._cache
+
+    def __getitem__(self, i: int):
+        import torch
+
+        shard = int(np.searchsorted(self._cum, i, side="right") - 1)
+        start = i - int(self._cum[shard])
+        rgb, actions, depth, seg = self._load(shard)
+        s = slice(start, start + self.seq_len)
+        return (
+            torch.from_numpy(rgb[s].copy()),                    # (16,128,128,3) u8
+            torch.from_numpy(actions[s].copy()),                # (16,10) u8
+            torch.from_numpy(depth[s].astype(np.float32).copy()),  # (16,128,128)
+            torch.from_numpy(seg[s].copy()),                    # (16,128,128) u16
+        )
+
+
+def baseline(data: str, steps: int = 50_000, batch: int = 32, seq_len: int = 16, lr: float = 3e-4,
+             limit_steps: int | None = None):
+    """RSSM-lite latent-prediction baseline vs copy-last-latent. See
+    baseline.py for the model. Prints the acceptance ratio."""
+    from .baseline import run_baseline
+
+    return run_baseline(data, steps=steps, batch=batch, seq_len=seq_len, lr=lr, limit_steps=limit_steps)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    e = sub.add_parser("export")
+    e.add_argument("--task", required=True)
+    e.add_argument("--episodes", type=int, default=50)
+    e.add_argument("--render", type=int, default=1)
+    e.add_argument("--seed0", type=int, default=0)
+    e.add_argument("--epsilon", type=float, default=0.0, help="uniform-random action mixture")
+    e.add_argument("--out", required=True)
+    b = sub.add_parser("baseline")
+    b.add_argument("--data", required=True)
+    b.add_argument("--steps", type=int, default=50_000)
+    b.add_argument("--batch", type=int, default=32)
+    b.add_argument("--seq-len", type=int, default=16)
+    b.add_argument("--limit-steps", type=int, default=None, help="dev override for a quick run")
+    args = ap.parse_args(argv)
+
+    if args.cmd == "export":
+        export(args.task, args.episodes, args.out, render=args.render, seed0=args.seed0, epsilon=args.epsilon)
+        return 0
+    if args.cmd == "baseline":
+        ratio = baseline(args.data, steps=args.steps, batch=args.batch, seq_len=args.seq_len,
+                         limit_steps=args.limit_steps)
+        print(f"acceptance: model/copy MSE ratio = {ratio:.3f} (need < 0.9)")
+        return 0 if ratio < 0.9 else 1
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

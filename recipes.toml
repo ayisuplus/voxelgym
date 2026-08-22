@@ -1,0 +1,72 @@
+# Crafting recipes. `craft` action references `id`; 0 = noop.
+# kind = "shapeless": `inputs` multiset consumed.
+# kind = "shaped": `pattern` rows + `key` define the input multiset
+# (no crafting grid in the action space; shape is validated by construction).
+# needs_table: a crafting_table block within 4 cells of the agent.
+
+[[recipe]]
+id = 1
+name = "planks"
+kind = "shapeless"
+inputs = { log = 1 }
+out = "planks"
+count = 4
+needs_table = false
+
+[[recipe]]
+id = 2
+name = "stick"
+kind = "shaped"
+pattern = ["P", "P"]
+key = { P = "planks" }
+out = "stick"
+count = 4
+needs_table = false
+
+[[recipe]]
+id = 3
+name = "crafting_table"
+kind = "shapeless"
+inputs = { planks = 4 }
+out = "crafting_table"
+count = 1
+needs_table = false
+
+[[recipe]]
+id = 4
+name = "wooden_pickaxe"
+kind = "shaped"
+pattern = ["PPP", " S ", " S "]
+key = { P = "planks", S = "stick" }
+out = "wooden_pickaxe"
+count = 1
+needs_table = true
+
+[[recipe]]
+id = 5
+name = "stone_pickaxe"
+kind = "shaped"
+pattern = ["PPP", " S ", " S "]
+key = { P = "cobblestone", S = "stick" }
+out = "stone_pickaxe"
+count = 1
+needs_table = true
+
+[[recipe]]
+id = 6
+name = "iron_pickaxe"
+kind = "shaped"
+pattern = ["PPP", " S ", " S "]
+key = { P = "iron_ingot", S = "stick" }
+out = "iron_pickaxe"
+count = 1
+needs_table = true
+
+[[recipe]]
+id = 7
+name = "furnace"
+kind = "shapeless"
+inputs = { cobblestone = 8 }
+out = "furnace"
+count = 1
+needs_table = true

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxelgym"
+version = "0.1.0"
+description = "Deterministic voxel physics simulator with gymnasium API for training AI physical understanding"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = ["gymnasium", "numpy", "pyarrow"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["voxelgym*"]
