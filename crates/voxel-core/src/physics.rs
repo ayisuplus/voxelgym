@@ -29,6 +29,13 @@ pub struct Physics {
     pub ground_force: f64,
     /// Max air-control force (accel 0.02 at mass 1 — MC air accel).
     pub air_force: f64,
+    /// World scale: cells per meter (1.0 = Minecraft 1 m cells; 2.0 = 0.5 m
+    /// cells). Structural knob: set at world construction, serialized in
+    /// snapshots. All spatial constants (here and the consts in entity/
+    /// raycast/item/loose/fire/tnt) are multiplied by it; temporal
+    /// constants (tick periods, damage intervals) are not. Circuit power
+    /// range is a 4-bit discrete semantic and is intentionally NOT scaled.
+    pub scale: f64,
 }
 
 impl Default for Physics {
@@ -50,6 +57,7 @@ impl Default for Physics {
             agent_mass: 1.0,
             ground_force: entity::ACCEL_GROUND,
             air_force: entity::ACCEL_AIR,
+            scale: 1.0,
         }
     }
 }
@@ -59,6 +67,7 @@ impl Physics {
         "gravity", "gravity_mult", "terminal_vy", "jump_vy", "walk_speed", "sneak_mult",
         "water_spread", "lava_spread", "water_period", "lava_period", "fall_safe",
         "lava_damage", "suffocate_damage", "agent_mass", "ground_force", "air_force",
+        "scale",
     ];
 
     pub fn set(&mut self, key: &str, value: f64) -> Result<(), String> {
@@ -79,6 +88,7 @@ impl Physics {
             "agent_mass" => self.agent_mass = value.max(1e-6),
             "ground_force" => self.ground_force = value,
             "air_force" => self.air_force = value,
+            "scale" => self.scale = value.max(1e-6),
             _ => return Err(format!("unknown physics field '{key}'")),
         }
         Ok(())
@@ -102,8 +112,29 @@ impl Physics {
             "agent_mass" => self.agent_mass,
             "ground_force" => self.ground_force,
             "air_force" => self.air_force,
+            "scale" => self.scale,
             _ => return None,
         })
+    }
+
+    /// Returns a copy with every SPATIAL field multiplied by `s` (called
+    /// once at world construction; `scale` itself is set to `s`). Ratios
+    /// (sneak_mult, gravity_mult) and time-based fields (periods, damage
+    /// per N ticks) stay untouched.
+    pub fn spatially_scaled(mut self, s: f64) -> Self {
+        if s != 1.0 {
+            self.gravity *= s;
+            self.terminal_vy *= s;
+            self.jump_vy *= s;
+            self.walk_speed *= s;
+            self.ground_force *= s;
+            self.air_force *= s;
+            self.fall_safe *= s;
+            self.water_spread = (self.water_spread as f64 * s).round() as u16;
+            self.lava_spread = (self.lava_spread as f64 * s).round() as u16;
+        }
+        self.scale = s;
+        self
     }
 
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {

@@ -44,10 +44,11 @@ impl World {
 /// Phase 2b: integrate item physics. Items are taken out of the world to
 /// satisfy the borrow checker (collision reads the world).
 pub fn tick_items_physics(world: &mut World) {
+    let ih = ITEM_HALF * world.physics.scale;
     let mut items = std::mem::take(&mut world.items);
     for it in items.iter_mut() {
-        let mut min = [it.pos[0] - ITEM_HALF, it.pos[1] - ITEM_HALF, it.pos[2] - ITEM_HALF];
-        let mut max = [it.pos[0] + ITEM_HALF, it.pos[1] + ITEM_HALF, it.pos[2] + ITEM_HALF];
+        let mut min = [it.pos[0] - ih, it.pos[1] - ih, it.pos[2] - ih];
+        let mut max = [it.pos[0] + ih, it.pos[1] + ih, it.pos[2] + ih];
         let vel = it.vel;
         let dy = clip_axis(world, &mut min, &mut max, 1, vel[1]);
         let grounded = vel[1] < 0.0 && dy != vel[1];
@@ -86,6 +87,8 @@ pub fn tick_items_physics(world: &mut World) {
 
 /// Phase 6: merge nearby stacks, pickup by the agent, despawn.
 pub fn tick_items_logic(world: &mut World) {
+    let sc = world.physics.scale;
+    let merge_r2 = (MERGE_RADIUS * sc) * (MERGE_RADIUS * sc);
     // merge: same item, centers within MERGE_RADIUS, combined <= 64
     let mut items = std::mem::take(&mut world.items);
     let mut i = 0;
@@ -97,7 +100,7 @@ pub fn tick_items_logic(world: &mut World) {
                 let d2 = (a.pos[0] - b.pos[0]).powi(2)
                     + (a.pos[1] - b.pos[1]).powi(2)
                     + (a.pos[2] - b.pos[2]).powi(2);
-                if d2 < MERGE_RADIUS * MERGE_RADIUS {
+                if d2 < merge_r2 {
                     items[i].count += items[j].count;
                     items[i].age = items[i].age.max(items[j].age);
                     items.remove(j);
@@ -111,7 +114,8 @@ pub fn tick_items_logic(world: &mut World) {
 
     // pickup + despawn
     let apos = world.agent.pos;
-    let agent_center = [apos[0], apos[1] + 0.9, apos[2]];
+    let agent_center = [apos[0], apos[1] + 0.9 * sc, apos[2]];
+    let pickup_r2 = (PICKUP_RADIUS * sc) * (PICKUP_RADIUS * sc);
     let dead = world.agent.dead;
     let mut kept = Vec::with_capacity(items.len());
     for mut it in items {
@@ -121,7 +125,7 @@ pub fn tick_items_logic(world: &mut World) {
         let d2 = (it.pos[0] - agent_center[0]).powi(2)
             + (it.pos[1] - agent_center[1]).powi(2)
             + (it.pos[2] - agent_center[2]).powi(2);
-        if !dead && it.age >= PICKUP_DELAY_TICKS as u64 && d2 < PICKUP_RADIUS * PICKUP_RADIUS {
+        if !dead && it.age >= PICKUP_DELAY_TICKS as u64 && d2 < pickup_r2 {
             let left = world.agent.inventory.add(it.item, it.count);
             let taken = it.count - left;
             if taken > 0 {

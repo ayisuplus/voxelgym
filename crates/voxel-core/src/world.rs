@@ -16,7 +16,7 @@ use crate::recipe::FurnaceState;
 use crate::rng::Rng;
 use crate::worldgen::{apply_scenario, generate_chunk, Preset, ScenarioSpec};
 
-pub const SNAPSHOT_VERSION: u32 = 4;
+pub const SNAPSHOT_VERSION: u32 = 5;
 
 /// Per-tick events for achievement hooks (transient; not part of snapshots —
 /// they are derived from state transitions, never their source).
@@ -74,15 +74,26 @@ pub struct World {
 
 impl World {
     pub fn new(seed: u64, preset: Preset, scenario: ScenarioSpec) -> Self {
+        Self::new_scaled(seed, preset, scenario, 1.0)
+    }
+
+    /// `scale` = cells per meter (1.0 = MC 1 m cells; 2.0 = 0.5 m cells).
+    /// Physical world size is invariant: chunk height becomes 128*scale,
+    /// noise is sampled per meter, all spatial constants multiply by scale.
+    pub fn new_scaled(seed: u64, preset: Preset, scenario: ScenarioSpec, scale: f64) -> Self {
+        assert!(
+            scale >= 1.0 && (128.0 * scale).fract() == 0.0,
+            "scale must be >= 1 with 128*scale integral (got {scale})"
+        );
         let mut w = World {
             seed,
             preset,
-            physics: Physics::default(),
+            physics: Physics::default().spatially_scaled(scale),
             scenario,
             chunks: HashMap::new(),
             tick: 0,
             rng: Rng::new(seed, 1),
-            agent: Agent::new([0.5, 8.0, 0.5]),
+            agent: Agent::new([0.5, 8.0 * scale, 0.5], scale),
             mining: None,
             place_cooldown: 0,
             dirty: Vec::new(),
@@ -153,34 +164,41 @@ impl World {
             w.dirty.push(c);
         }
         let spawn = w.find_spawn(0, 0);
-        w.agent = Agent::new(spawn);
+        w.agent = Agent::new(spawn, w.physics.scale);
         w
     }
 
-    /// Highest solid top + 1 at column (x, z); fallback y=8 for void.
+    /// World height in cells: 128 * scale.
+    pub fn height(&self) -> i32 {
+        (CHUNK_Y as f64 * self.physics.scale) as i32
+    }
+
+    /// Highest solid top + 1 at column (x, z); fallback y=8*scale for void.
     pub fn find_spawn(&mut self, x: i32, z: i32) -> [f64; 3] {
-        for y in (0..=WORLD_MAX_Y).rev() {
+        for y in (0..self.height()).rev() {
             if self.is_solid(x, y, z) {
                 return [x as f64 + 0.5, (y + 1) as f64, z as f64 + 0.5];
             }
         }
-        [x as f64 + 0.5, 8.0, z as f64 + 0.5]
+        let s = self.physics.scale;
+        [x as f64 + 0.5, 8.0 * s, z as f64 + 0.5]
     }
 
     pub fn ensure_chunk(&mut self, cx: i32, cz: i32) -> &mut Chunk {
+        let scale = self.physics.scale;
         self.chunks.entry((cx, cz)).or_insert_with(|| {
-            let mut c = generate_chunk(self.seed, self.preset, cx, cz);
+            let mut c = generate_chunk(self.seed, self.preset, cx, cz, scale);
             apply_scenario(&mut c, cx, cz, &self.scenario);
             c
         })
     }
 
-    /// Raw cell at world coords. y<0 -> bedrock, y>=128 -> air.
+    /// Raw cell at world coords. y<0 -> bedrock, y>=height -> air.
     pub fn get_block(&mut self, x: i32, y: i32, z: i32) -> u16 {
         if y < WORLD_MIN_Y {
             return BEDROCK;
         }
-        if y > WORLD_MAX_Y {
+        if y >= self.height() {
             return AIR;
         }
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
@@ -194,7 +212,7 @@ impl World {
         if y < WORLD_MIN_Y {
             return BEDROCK;
         }
-        if y > WORLD_MAX_Y {
+        if y >= self.height() {
             return AIR;
         }
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
@@ -209,7 +227,7 @@ impl World {
     }
 
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, cell: u16) {
-        if !(WORLD_MIN_Y..=WORLD_MAX_Y).contains(&y) {
+        if !(WORLD_MIN_Y..self.height()).contains(&y) {
             return;
         }
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
@@ -457,11 +475,11 @@ impl World {
         let mut keys: Vec<(i32, i32)> = self.chunks.keys().copied().collect();
         keys.sort_unstable();
         for (cx, cz) in keys {
-            let mut pristine = generate_chunk(self.seed, self.preset, cx, cz);
+            let mut pristine = generate_chunk(self.seed, self.preset, cx, cz, self.physics.scale);
             apply_scenario(&mut pristine, cx, cz, &self.scenario);
             let cur = &self.chunks[&(cx, cz)];
             let mut diffs: Vec<(u32, u16)> = Vec::new();
-            for i in 0..CHUNK_VOL {
+            for i in 0..cur.blocks.len() {
                 if cur.blocks[i] != pristine.blocks[i] {
                     diffs.push((i as u32, cur.blocks[i]));
                 }
@@ -512,15 +530,16 @@ impl World {
         let physics = Physics::read_from(&mut r)?;
 
         let nchunks = r.u32()? as usize;
+        let chunk_h = (CHUNK_Y as f64 * physics.scale) as usize;
         let mut chunks = HashMap::with_capacity(nchunks);
         for _ in 0..nchunks {
             let cx = r.i32()?;
             let cz = r.i32()?;
-            let mut blocks = Box::new([0u16; CHUNK_VOL]);
+            let mut blocks = vec![0u16; CHUNK_X * chunk_h * CHUNK_Z];
             for b in blocks.iter_mut() {
                 *b = r.u16()?;
             }
-            chunks.insert((cx, cz), Chunk { blocks, generated: true });
+            chunks.insert((cx, cz), Chunk { blocks, generated: true, h: chunk_h });
         }
 
         let mut pos = [0.0; 3];
@@ -636,7 +655,7 @@ impl World {
             pending_booms.push((x, y, z, due));
         }
 
-        let mut agent = Agent::new(pos);
+        let mut agent = Agent::new(pos, physics.scale);
         agent.vel = vel;
         agent.yaw = yaw;
         agent.pitch = pitch;
@@ -712,7 +731,7 @@ impl World {
 
     /// Highest solid block y at column (x, z); -1 if none.
     pub fn surface_y(&mut self, x: i32, z: i32) -> i32 {
-        for y in (0..=WORLD_MAX_Y).rev() {
+        for y in (0..self.height()).rev() {
             if self.is_solid(x, y, z) {
                 return y;
             }

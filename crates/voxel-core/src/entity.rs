@@ -50,10 +50,15 @@ pub struct Agent {
     pub inventory: Inventory,
     /// Selected hotbar slot 0..8.
     pub selected: usize,
+    /// Body dims in cells: HALF_WIDTH/HEIGHT/EYE_HEIGHT * world scale.
+    /// (Fields, not consts, so the same physics code runs at any scale.)
+    pub half_width: f64,
+    pub height: f64,
+    pub eye_height: f64,
 }
 
 impl Agent {
-    pub fn new(spawn: [f64; 3]) -> Self {
+    pub fn new(spawn: [f64; 3], scale: f64) -> Self {
         Agent {
             pos: spawn,
             vel: [0.0; 3],
@@ -68,11 +73,14 @@ impl Agent {
             fire_timer: 0,
             inventory: Inventory::new(),
             selected: 0,
+            half_width: HALF_WIDTH * scale,
+            height: HEIGHT * scale,
+            eye_height: EYE_HEIGHT * scale,
         }
     }
 
     pub fn eye(&self) -> [f64; 3] {
-        [self.pos[0], self.pos[1] + EYE_HEIGHT, self.pos[2]]
+        [self.pos[0], self.pos[1] + self.eye_height, self.pos[2]]
     }
 
     /// Unit look vector from yaw/pitch (MC convention).
@@ -95,17 +103,17 @@ impl Agent {
     /// AABB min corner.
     pub fn aabb_min(&self) -> [f64; 3] {
         [
-            self.pos[0] - HALF_WIDTH,
+            self.pos[0] - self.half_width,
             self.pos[1],
-            self.pos[2] - HALF_WIDTH,
+            self.pos[2] - self.half_width,
         ]
     }
 
     pub fn aabb_max(&self) -> [f64; 3] {
         [
-            self.pos[0] + HALF_WIDTH,
-            self.pos[1] + HEIGHT,
-            self.pos[2] + HALF_WIDTH,
+            self.pos[0] + self.half_width,
+            self.pos[1] + self.height,
+            self.pos[2] + self.half_width,
         ]
     }
 }
@@ -234,7 +242,7 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
         // fall distance is reset by water; no landing damage in water
         world.agent.fall_distance = 0.0;
     } else if input.jump && world.agent.on_ground {
-        world.agent.vel[1] = JUMP_VY;
+        world.agent.vel[1] = ph.jump_vy;
         world.agent.on_ground = false;
     }
 
@@ -296,11 +304,12 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
     // linear drag applied to the post-gravity velocity (MC's (v-g)*0.98
     // form, kept verbatim for literature comparability).
     if in_water {
-        let mut vy = world.agent.vel[1] * WATER_VY_MULT - WATER_SINK;
+        let sc = ph.scale;
+        let mut vy = world.agent.vel[1] * WATER_VY_MULT - WATER_SINK * sc;
         if input.jump {
-            vy += WATER_SWIM_UP;
+            vy += WATER_SWIM_UP * sc;
         }
-        world.agent.vel[1] = vy.clamp(TERMINAL_VY, 1.0);
+        world.agent.vel[1] = vy.clamp(ph.terminal_vy, 1.0 * sc);
     } else {
         world.agent.vel[1] = (world.agent.vel[1] - ph.gravity) * ph.gravity_mult;
         if world.agent.vel[1] < ph.terminal_vy {

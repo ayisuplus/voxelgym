@@ -107,6 +107,7 @@ pub fn scan(
     }
     let bound = (RENDER_RADIUS_CHUNKS * 16) as f64;
     let max_range = cfg.max_range.min(bound);
+    let world_top = world.height();
 
     let side = (2 * RENDER_RADIUS_CHUNKS + 1) as usize;
     let mut grid: Vec<Option<&voxel_core::Chunk>> = vec![None; side * side];
@@ -121,7 +122,7 @@ pub fn scan(
         if y < 0 {
             return BEDROCK;
         }
-        if y > 127 {
+        if y >= world_top {
             return AIR;
         }
         let gx = x.div_euclid(16) - (ecx - RENDER_RADIUS_CHUNKS);

@@ -79,9 +79,15 @@ pub type ScenarioSpec = Vec<(Region, u16)>;
 /// Surface height (grass y) of the default terrain at world column (x, z),
 /// before biome adjustment.
 pub fn default_height(seed: u64, x: i32, z: i32) -> i32 {
+    default_height_scaled(seed, x, z, 1.0)
+}
+
+/// Scale-aware variant: noise sampled per METER (coords / s), heights in
+/// cells (values * s) — the same physical terrain, finer cells.
+pub fn default_height_scaled(seed: u64, x: i32, z: i32, s: f64) -> i32 {
     let fbm = height_noise(seed);
-    let v = fbm.get([x as f64 / 64.0, z as f64 / 64.0]);
-    (64.0 + v * 16.0).floor() as i32
+    let v = fbm.get([x as f64 / (64.0 * s), z as f64 / (64.0 * s)]);
+    ((64.0 + v * 16.0) * s).floor() as i32
 }
 
 // ---------------------------------------------------------------- biomes --
@@ -117,7 +123,11 @@ fn biome_noise(seed: u64) -> Fbm<OpenSimplex> {
 /// distribution (p17/p50/p73/p92): ~17% ocean, 33% plains, 23% desert,
 /// 19% hills, ~8% volcanic.
 pub fn biome_at(seed: u64, x: i32, z: i32) -> Biome {
-    let v = biome_noise(seed).get([x as f64 / 96.0, z as f64 / 96.0]);
+    biome_at_scaled(seed, x, z, 1.0)
+}
+
+pub fn biome_at_scaled(seed: u64, x: i32, z: i32, s: f64) -> Biome {
+    let v = biome_noise(seed).get([x as f64 / (96.0 * s), z as f64 / (96.0 * s)]);
     if v < -0.16 {
         Biome::Ocean
     } else if v < 0.007 {
@@ -162,60 +172,76 @@ pub const ORE_NOISE_SCALE: f64 = 2.927;
 
 /// Generate one chunk column for the given preset. Scenario overlay is applied
 /// separately by the caller (`World::ensure_chunk`).
-pub fn generate_chunk(seed: u64, preset: Preset, cx: i32, cz: i32) -> Chunk {
-    let mut chunk = Chunk::empty();
+/// `scale` = cells per meter (1.0 = MC cells; 2.0 = 0.5 m cells): noise is
+/// sampled per meter, all vertical constants multiply by `scale`, and the
+/// chunk height becomes 128*scale — same physical world, finer cells.
+pub fn generate_chunk(seed: u64, preset: Preset, cx: i32, cz: i32, scale: f64) -> Chunk {
+    let mut chunk = Chunk::with_height((CHUNK_Y as f64 * scale) as usize);
     match preset {
         Preset::Void => {}
         Preset::Flat => {
-            // bedrock y0, dirt y1..=3, grass y4 (literal contract stack)
+            // bedrock s cells, dirt 3s, grass 4s (the literal contract stack
+            // scaled; top of the world at 4s+1)
+            let s = scale.round() as usize;
             for lz in 0..16 {
                 for lx in 0..16 {
-                    chunk.set(lx, 0, lz, BEDROCK);
-                    for y in 1..=3 {
+                    for y in 0..s {
+                        chunk.set(lx, y, lz, BEDROCK);
+                    }
+                    for y in s..4 * s {
                         chunk.set(lx, y, lz, DIRT);
                     }
-                    chunk.set(lx, 4, lz, GRASS_BLOCK);
+                    chunk.set(lx, 4 * s, lz, GRASS_BLOCK);
                 }
             }
         }
-        Preset::Default => gen_default(seed, cx, cz, &mut chunk),
+        Preset::Default => gen_default(seed, cx, cz, &mut chunk, scale),
     }
     chunk.generated = true;
     chunk
 }
 
-fn gen_default(seed: u64, cx: i32, cz: i32, chunk: &mut Chunk) {
+fn gen_default(seed: u64, cx: i32, cz: i32, chunk: &mut Chunk, scale: f64) {
     let coal = ore_noise(seed, 11);
     let iron = ore_noise(seed, 23);
     let diamond = ore_noise(seed, 37);
     let caves = cave_noise(seed);
+    let s = scale;
+    let sea = (SEA_LEVEL as f64 * s) as i32;
+    let ymax = (chunk.h as i32) - 1;
+    let bedrock_cells = s.round() as i32;
+    let si = |v: i32| (v as f64 * s) as i32; // vertical cell constants
 
     for lz in 0..16 {
         for lx in 0..16 {
             let x = cx * 16 + lx as i32;
             let z = cz * 16 + lz as i32;
-            let biome = biome_at(seed, x, z);
-            let h_raw = default_height(seed, x, z);
+            let biome = biome_at_scaled(seed, x, z, s);
+            let h_raw = default_height_scaled(seed, x, z, s);
+            let base = 64.0 * s;
             let h = match biome {
-                Biome::Ocean => h_raw - 9, // deep basin
-                Biome::Hills => 64 + ((h_raw - 64) as f64 * 1.8) as i32, // amplified relief
+                Biome::Ocean => h_raw - si(9), // deep basin
+                Biome::Hills => base as i32 + ((h_raw as f64 - base) * 1.8) as i32, // amplified relief
                 _ => h_raw,
             }
-            .clamp(6, WORLD_MAX_Y - 1);
+            .clamp(si(6), ymax);
 
-            // slope for exposed-rock decision (hills)
+            // slope for exposed-rock decision (hills): same physical gradient
+            // shows s times the per-cell delta, so the threshold scales too
             let slope = if biome == Biome::Hills {
-                let hx = default_height(seed, x + 1, z);
-                let hz = default_height(seed, x, z + 1);
+                let hx = default_height_scaled(seed, x + 1, z, s);
+                let hz = default_height_scaled(seed, x, z + 1, s);
                 ((hx - h_raw).abs() + (hz - h_raw).abs()) as f64 * 1.8
             } else {
                 0.0
             };
 
             // --- base layers ---
-            chunk.set(lx, 0, lz, BEDROCK);
-            for y in 1..=h {
-                let id = if y <= h - 4 {
+            for y in 0..bedrock_cells {
+                chunk.set(lx, y as usize, lz, BEDROCK);
+            }
+            for y in bedrock_cells..=h {
+                let id = if y <= h - si(4) {
                     STONE
                 } else if y <= h - 1 {
                     match biome {
@@ -226,7 +252,7 @@ fn gen_default(seed: u64, cx: i32, cz: i32, chunk: &mut Chunk) {
                     match biome {
                         Biome::Ocean | Biome::Desert => SAND,
                         Biome::Hills => {
-                            if slope > 2.5 {
+                            if slope > 2.5 * s {
                                 STONE // exposed rock on steep slopes
                             } else {
                                 GRASS_BLOCK
@@ -246,34 +272,35 @@ fn gen_default(seed: u64, cx: i32, cz: i32, chunk: &mut Chunk) {
             }
 
             // --- ores: 3D noise threshold, replace stone only ---
-            for y in 1..=h {
-                let p = [x as f64 * 0.15, y as f64 * 0.15, z as f64 * 0.15];
+            // noise sampled per meter (coords / s); depth bands in cells (* s)
+            for y in bedrock_cells..=h {
+                let p = [x as f64 * 0.15 / s, y as f64 * 0.15 / s, z as f64 * 0.15 / s];
                 let cur = chunk.get(lx, y as usize, lz);
                 if cur != STONE {
                     continue;
                 }
-                if (5..=90).contains(&y) && coal.get(p) * ORE_NOISE_SCALE > 0.72 {
+                if (si(5)..=si(90)).contains(&y) && coal.get(p) * ORE_NOISE_SCALE > 0.72 {
                     chunk.set(lx, y as usize, lz, COAL_ORE);
-                } else if (5..=48).contains(&y) && iron.get(p) * ORE_NOISE_SCALE > 0.78 {
+                } else if (si(5)..=si(48)).contains(&y) && iron.get(p) * ORE_NOISE_SCALE > 0.78 {
                     chunk.set(lx, y as usize, lz, IRON_ORE);
-                } else if (1..=16).contains(&y) && diamond.get(p) * ORE_NOISE_SCALE > 0.85 {
+                } else if (bedrock_cells..=si(16)).contains(&y) && diamond.get(p) * ORE_NOISE_SCALE > 0.85 {
                     chunk.set(lx, y as usize, lz, DIAMOND_ORE);
                 }
             }
 
-            // --- caves: carve underground, never below y=3 (solid floor) ---
-            for y in 3..=(h - 4).max(3) {
-                if y > h - 4 {
+            // --- caves: carve underground, never into the bottom 3s cells ---
+            for y in si(3)..=(h - si(4)).max(si(3)) {
+                if y > h - si(4) {
                     break;
                 }
-                let v = caves.get([x as f64 / 18.0, y as f64 / 18.0, z as f64 / 18.0]);
+                let v = caves.get([x as f64 / (18.0 * s), y as f64 / (18.0 * s), z as f64 / (18.0 * s)]);
                 if v > CAVE_T {
                     chunk.set(lx, y as usize, lz, AIR);
                 }
             }
-            // deep-cave lava pockets: carved floor cells at y<=10
-            if h > 8 {
-                for y in 3..=CAVE_LAVA_Y.min(h - 4) {
+            // deep-cave lava pockets: carved floor cells at y<=10s
+            if h > si(8) {
+                for y in si(3)..=si(10).min(h - si(4)) {
                     let cur = chunk.get(lx, y as usize, lz);
                     if cur == AIR && chunk.get(lx, y as usize - 1, lz) != AIR {
                         if hash2(seed ^ 0x1A1A, x, z) % 1000 < 220 {
@@ -285,27 +312,27 @@ fn gen_default(seed: u64, cx: i32, cz: i32, chunk: &mut Chunk) {
 
             // --- volcanic surface lava pools ---
             if biome == Biome::Volcanic && hash2(seed ^ 0xF1AE, x, z) % 1000 < 6 {
-                // 1-deep basin of lava at the surface
+                // 1s-deep basin of lava at the surface
                 chunk.set(lx, h as usize, lz, LAVA);
-                if h + 1 <= WORLD_MAX_Y {
+                if h + 1 <= ymax {
                     chunk.set(lx, (h + 1) as usize, lz, COBBLESTONE);
                 }
             }
 
             // --- water fill & beaches ---
-            let near_water = h < SEA_LEVEL
-                || default_height(seed, x + 1, z) < SEA_LEVEL
-                || default_height(seed, x - 1, z) < SEA_LEVEL
-                || default_height(seed, x, z + 1) < SEA_LEVEL
-                || default_height(seed, x, z - 1) < SEA_LEVEL;
-            if biome != Biome::Desert && biome != Biome::Volcanic && h <= SEA_LEVEL + 2 && near_water {
+            let near_water = h < sea
+                || default_height_scaled(seed, x + 1, z, s) < sea
+                || default_height_scaled(seed, x - 1, z, s) < sea
+                || default_height_scaled(seed, x, z + 1, s) < sea
+                || default_height_scaled(seed, x, z - 1, s) < sea;
+            if biome != Biome::Desert && biome != Biome::Volcanic && h <= sea + si(2) && near_water {
                 let surf = chunk.get(lx, h as usize, lz);
                 if surf == GRASS_BLOCK || surf == DIRT {
                     chunk.set(lx, h as usize, lz, SAND);
                 }
             }
-            if h < SEA_LEVEL {
-                for y in (h + 1)..=SEA_LEVEL {
+            if h < sea {
+                for y in (h + 1)..=sea {
                     let cur = chunk.get(lx, y as usize, lz);
                     if cur == AIR {
                         chunk.set(lx, y as usize, lz, WATER); // state 0 = source
@@ -313,31 +340,35 @@ fn gen_default(seed: u64, cx: i32, cz: i32, chunk: &mut Chunk) {
                 }
             }
 
-            // --- trees: plains only ---
+            // --- trees: plains only; trunk/crown scale with the cells ---
             let th = hash2(seed, x, z);
-            if biome == Biome::Plains && th % 1000 < 20 && h > SEA_LEVEL {
+            if biome == Biome::Plains && th % 1000 < 20 && h > sea {
                 let surf = chunk.get(lx, h as usize, lz);
                 if surf == GRASS_BLOCK {
-                    place_tree(chunk, lx, h + 1, lz, 4 + (th >> 20) % 3);
+                    place_tree(chunk, lx, h + 1, lz, si(4) as u64 + (th >> 20) % (3 * s as u64));
                 }
             }
         }
     }
 }
 
-/// Trunk of `height` logs at (lx, y0, lz); leaf ball radius 2 around top.
-/// Writes are clamped to this chunk — cross-border parts are dropped, which
-/// is deterministic (same for any generation order).
+/// Trunk of `height` logs at (lx, y0, lz); leaf ball around the top with
+/// radius 2*scale cells. Writes are clamped to this chunk — cross-border
+/// parts are dropped, which is deterministic (same for any generation order).
 fn place_tree(chunk: &mut Chunk, lx: usize, y0: i32, lz: usize, height: u64) {
+    let s = chunk.h / CHUNK_Y; // cells per meter (scale), >= 1
     let top = y0 + height as i32 - 1;
-    for dy in -2i32..=2 {
-        for dx in -2i32..=2 {
-            for dz in -2i32..=2 {
-                if dx * dx + dy * dy + dz * dz > 6 {
+    let r = (2 * s) as i32;
+    let r2_max = (6 * s * s) as i32; // sphere of radius ~2.45*scale
+    let ymax = chunk.h as i32;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            for dz in -r..=r {
+                if dx * dx + dy * dy + dz * dz > r2_max {
                     continue;
                 }
                 let (x, y, z) = (lx as i32 + dx, top + dy, lz as i32 + dz);
-                if !(0..16).contains(&x) || !(0..16).contains(&z) || !(0..128).contains(&y) {
+                if !(0..16).contains(&x) || !(0..16).contains(&z) || !(0..ymax).contains(&y) {
                     continue;
                 }
                 let cur = chunk.get(x as usize, y as usize, z as usize);
@@ -348,7 +379,7 @@ fn place_tree(chunk: &mut Chunk, lx: usize, y0: i32, lz: usize, height: u64) {
         }
     }
     for y in y0..=top {
-        if (0..128).contains(&y) {
+        if (0..ymax).contains(&y) {
             chunk.set(lx, y as usize, lz, LOG);
         }
     }
@@ -367,7 +398,7 @@ pub fn apply_scenario(chunk: &mut Chunk, cx: i32, cz: i32, scenario: &ScenarioSp
         for z in z0..=z1 {
             for x in x0..=x1 {
                 for y in region.y0..=region.y1 {
-                    if (0..128).contains(&y) {
+                    if (0..chunk.h as i32).contains(&y) {
                         chunk.set(
                             (x - cx * 16) as usize,
                             y as usize,
@@ -385,27 +416,27 @@ pub fn apply_scenario(chunk: &mut Chunk, cx: i32, cz: i32, scenario: &ScenarioSp
 mod tests {
     use super::*;
 
-    fn chunk_bytes(c: &Chunk) -> &[u16; CHUNK_VOL] {
+    fn chunk_bytes(c: &Chunk) -> &[u16] {
         &c.blocks
     }
 
     #[test]
     fn same_seed_same_bytes() {
-        let a = generate_chunk(42, Preset::Default, 3, -7);
-        let b = generate_chunk(42, Preset::Default, 3, -7);
+        let a = generate_chunk(42, Preset::Default, 3, -7, 1.0);
+        let b = generate_chunk(42, Preset::Default, 3, -7, 1.0);
         assert_eq!(chunk_bytes(&a), chunk_bytes(&b));
     }
 
     #[test]
     fn different_seed_differs() {
-        let a = generate_chunk(1, Preset::Default, 0, 0);
-        let b = generate_chunk(2, Preset::Default, 0, 0);
+        let a = generate_chunk(1, Preset::Default, 0, 0, 1.0);
+        let b = generate_chunk(2, Preset::Default, 0, 0, 1.0);
         assert_ne!(chunk_bytes(&a), chunk_bytes(&b));
     }
 
     #[test]
     fn flat_layer_order() {
-        let c = generate_chunk(99, Preset::Flat, -2, 5);
+        let c = generate_chunk(99, Preset::Flat, -2, 5, 1.0);
         for lz in 0..16 {
             for lx in 0..16 {
                 assert_eq!(c.get(lx, 0, lz), BEDROCK);
@@ -422,13 +453,13 @@ mod tests {
 
     #[test]
     fn void_is_empty() {
-        let c = generate_chunk(7, Preset::Void, 0, 0);
+        let c = generate_chunk(7, Preset::Void, 0, 0, 1.0);
         assert!(c.blocks.iter().all(|&b| b == 0));
     }
 
     #[test]
     fn scenario_stamps() {
-        let mut c = generate_chunk(1, Preset::Flat, 0, 0);
+        let mut c = generate_chunk(1, Preset::Flat, 0, 0, 1.0);
         let spec = vec![(Region::new(-1, 5, -1, 20, 8, 30), STONE)];
         apply_scenario(&mut c, 0, 0, &spec);
         assert_eq!(c.get(0, 5, 0), STONE);
@@ -443,7 +474,7 @@ mod tests {
         let mut found_water = false;
         'outer: for cx in -3..=3 {
             for cz in -3..=3 {
-                let c = generate_chunk(1234, Preset::Default, cx, cz);
+                let c = generate_chunk(1234, Preset::Default, cx, cz, 1.0);
                 for y in 1..=SEA_LEVEL as usize {
                     for i in 0..256 {
                         let lx = i % 16;
@@ -480,7 +511,7 @@ mod tests {
         let mut total_stone = 0u32;
         for cx in 0..4 {
             for cz in 0..4 {
-                let c = generate_chunk(9, Preset::Default, cx, cz);
+                let c = generate_chunk(9, Preset::Default, cx, cz, 1.0);
                 for i in 0..256 {
                     let lx = i % 16;
                     let lz = i / 16;
@@ -513,8 +544,8 @@ mod tests {
                 if biome_at(5, x, z) != Biome::Volcanic {
                     continue;
                 }
-                let c = generate_chunk(5, Preset::Default, x.div_euclid(16), z.div_euclid(16));
-                for i in 0..CHUNK_VOL {
+                let c = generate_chunk(5, Preset::Default, x.div_euclid(16), z.div_euclid(16), 1.0);
+                for i in 0..c.blocks.len() {
                     if cell_id(c.blocks[i]) == LAVA {
                         found_lava = true;
                         break 'outer;
@@ -535,3 +566,63 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+    use crate::world::World;
+
+    #[test]
+    fn scale2_flat_stack() {
+        // 0.5 m cells: bedrock y0-1, dirt y2..=7, grass y8, surface top 9
+        let c = generate_chunk(99, Preset::Flat, 0, 0, 2.0);
+        assert_eq!(c.h, 256);
+        assert_eq!(c.get(3, 0, 3), BEDROCK);
+        assert_eq!(c.get(3, 1, 3), BEDROCK);
+        assert_eq!(c.get(3, 7, 3), DIRT);
+        assert_eq!(c.get(3, 8, 3), GRASS_BLOCK);
+        assert_eq!(c.get(3, 9, 3), AIR);
+    }
+
+    #[test]
+    fn scale2_default_world_deterministic_and_scaled() {
+        let a = generate_chunk(42, Preset::Default, 3, -7, 2.0);
+        let b = generate_chunk(42, Preset::Default, 3, -7, 2.0);
+        assert_eq!(a.blocks, b.blocks, "same seed+scale -> same bytes");
+        let c1 = generate_chunk(42, Preset::Default, 3, -7, 1.0);
+        assert_ne!(a.blocks.len(), c1.blocks.len(), "scale doubles chunk height");
+        // grass exists somewhere and sea level doubled
+        assert!(a.blocks.iter().any(|&b| cell_id(b) == GRASS_BLOCK || cell_id(b) == SAND));
+        // column (x=48+8): physical height consistent with the scaled field
+        let h1 = default_height(42, 56, -104);
+        let h2 = default_height_scaled(42, 56 * 2, -104 * 2, 2.0);
+        // same meter position: scaled height ~2x (within discretization)
+        assert!((h2 - 2 * h1).abs() <= 2, "h1={h1} h2={h2}");
+    }
+
+    #[test]
+    fn scale2_world_physics_smoke() {
+        use crate::tick::{step, Action};
+        let mut w = World::new_scaled(7, Preset::Flat, Vec::new(), 2.0);
+        // spawn on the scaled flat top (grass y8 -> feet y9)
+        let y = w.agent.pos[1];
+        assert!((y - 9.0).abs() < 1e-9, "spawn y {y}");
+        // walk speed doubles in cells/tick (same m/s)
+        assert!((w.physics.walk_speed - 0.4318).abs() < 1e-9);
+        // 20-cell fall (10 m) with fall_safe 6 -> floor(20-6)=14 damage
+        w.agent.pos = [8.5, 29.0, 8.5];
+        let idle = Action::default();
+        while !w.agent.on_ground {
+            step(&mut w, &idle);
+        }
+        assert_eq!(w.agent.hp, 6, "scaled fall damage");
+        // snapshot roundtrip at scale 2
+        let h0 = w.hash();
+        let snap = w.snapshot();
+        let mut w2 = World::restore(&snap).unwrap();
+        assert_eq!(w2.hash(), h0);
+        step(&mut w2, &idle);
+        step(&mut w, &idle);
+        assert_eq!(w.hash(), w2.hash(), "replay continues identically");
+    }
+}

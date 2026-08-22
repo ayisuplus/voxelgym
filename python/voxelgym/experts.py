@@ -1104,11 +1104,12 @@ def make_expert(task_name: str, task, seed: int = 0):
     return GatherExpert(task_name, seed=seed)
 
 
-def run_episode(task_name: str, seed: int, record_dir: str | None = None, render=False, epsilon: float = 0.0):
+def run_episode(task_name: str, seed: int, record_dir: str | None = None, render=False, epsilon: float = 0.0,
+                scale: float = 1.0):
     from .recorder import Recorder
 
     task = make_task(task_name)
-    env = VoxelGymEnv(task=task, seed=seed, render=render)
+    env = VoxelGymEnv(task=task, seed=seed, render=render, scale=scale)
     env.reset(seed=seed)
     expert = make_expert(task_name, task, seed=seed)
     rec = Recorder(record_dir, task_name, seed, render=bool(render)) if record_dir else None

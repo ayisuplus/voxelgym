@@ -50,6 +50,10 @@ pub fn tick_fire(world: &mut World, dirty: &[(i32, i32, i32)]) {
 
     let seed = world.seed;
     let bucket = world.tick / FIRE_PERIOD;
+    // spread radius: Manhattan ball of radius s — at scale 1 this is exactly
+    // the 6 face neighbors (DIRS6, legacy semantics); at scale s a 1 m gap
+    // is s cells, so "fire jumps a 1 m gap" holds at any cell size
+    let r = world.physics.scale.round() as i32;
     let mut cells: Vec<(i32, i32, i32)> = world.active_fire.iter().copied().collect();
     cells.sort_unstable();
 
@@ -59,13 +63,20 @@ pub fn tick_fire(world: &mut World, dirty: &[(i32, i32, i32)]) {
         let id = cell_id(cell);
         if id == LAVA {
             // persistent source: ignite flammable neighbors, never burns out
-            for (dx, dy, dz) in DIRS6 {
-                let n = (x + dx, y + dy, z + dz);
-                let nc = world.peek_block(n.0, n.1, n.2);
-                if block_def(cell_id(nc)).flammable
-                    && chance(seed, n.0, n.1, n.2, bucket, LAVA_IGNITE_P)
-                {
-                    new_fires.push(n);
+            for dx in -r..=r {
+                for dy in -r..=r {
+                    for dz in -r..=r {
+                        if dx.abs() + dy.abs() + dz.abs() > r || (dx == 0 && dy == 0 && dz == 0) {
+                            continue;
+                        }
+                        let n = (x + dx, y + dy, z + dz);
+                        let nc = world.peek_block(n.0, n.1, n.2);
+                        if block_def(cell_id(nc)).flammable
+                            && chance(seed, n.0, n.1, n.2, bucket, LAVA_IGNITE_P)
+                        {
+                            new_fires.push(n);
+                        }
+                    }
                 }
             }
             continue;
@@ -74,11 +85,18 @@ pub fn tick_fire(world: &mut World, dirty: &[(i32, i32, i32)]) {
             world.active_fire.remove(&(x, y, z));
             continue;
         }
-        for (dx, dy, dz) in DIRS6 {
-            let n = (x + dx, y + dy, z + dz);
-            let nc = world.peek_block(n.0, n.1, n.2);
-            if block_def(cell_id(nc)).flammable && chance(seed, n.0, n.1, n.2, bucket, SPREAD_P) {
-                new_fires.push(n);
+        for dx in -r..=r {
+            for dy in -r..=r {
+                for dz in -r..=r {
+                    if dx.abs() + dy.abs() + dz.abs() > r || (dx == 0 && dy == 0 && dz == 0) {
+                        continue;
+                    }
+                    let n = (x + dx, y + dy, z + dz);
+                    let nc = world.peek_block(n.0, n.1, n.2);
+                    if block_def(cell_id(nc)).flammable && chance(seed, n.0, n.1, n.2, bucket, SPREAD_P) {
+                        new_fires.push(n);
+                    }
+                }
             }
         }
         let st = cell_state(cell);

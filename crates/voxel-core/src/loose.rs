@@ -90,15 +90,17 @@ pub fn tick_falling(world: &mut World) {
     let mut falling = std::mem::take(&mut world.falling);
     let mut landed: Vec<(u64, u16, i32, i32, i32)> = Vec::new();
     for fb in falling.iter_mut() {
+        let sc = world.physics.scale;
+        let (fh, fht) = (FALL_HALF * sc, FALL_HEIGHT * sc);
         let mut min = [
-            fb.pos[0] - FALL_HALF,
-            fb.pos[1] - FALL_HEIGHT / 2.0,
-            fb.pos[2] - FALL_HALF,
+            fb.pos[0] - fh,
+            fb.pos[1] - fht / 2.0,
+            fb.pos[2] - fh,
         ];
         let mut max = [
-            fb.pos[0] + FALL_HALF,
-            fb.pos[1] + FALL_HEIGHT / 2.0,
-            fb.pos[2] + FALL_HALF,
+            fb.pos[0] + fh,
+            fb.pos[1] + fht / 2.0,
+            fb.pos[2] + fh,
         ];
         let vel = fb.vel;
         let dy = clip_axis(world, &mut min, &mut max, 1, vel[1]);
@@ -146,10 +148,12 @@ pub fn tick_falling(world: &mut World) {
             fb.vel = [0.0; 3];
             fb.pos[1] = -1.0e9; // mark dead; removed below
         } else {
-            // gravity for next tick (loose-block constant, not entity 0.08)
-            fb.vel[1] = (fb.vel[1] - FALL_GRAVITY) * FALL_GRAVITY_MULT;
-            if fb.vel[1] < -3.92 {
-                fb.vel[1] = -3.92;
+            // gravity for next tick (loose-block constant, not entity 0.08;
+            // spatial -> scales with the world)
+            fb.vel[1] = (fb.vel[1] - FALL_GRAVITY * sc) * FALL_GRAVITY_MULT;
+            let term = -3.92 * sc;
+            if fb.vel[1] < term {
+                fb.vel[1] = term;
             }
         }
     }

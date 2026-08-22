@@ -24,9 +24,18 @@ fn parse_scenario(raw: Option<Vec<(i32, i32, i32, i32, i32, i32, u16)>>) -> Scen
 }
 
 fn make_world(seed: u64, preset: &str, scenario: ScenarioSpec) -> PyResult<World> {
+    make_world_scaled(seed, preset, scenario, 1.0)
+}
+
+fn make_world_scaled(seed: u64, preset: &str, scenario: ScenarioSpec, scale: f64) -> PyResult<World> {
     let p = Preset::from_str(preset)
         .ok_or_else(|| PyValueError::new_err(format!("unknown preset '{preset}'")))?;
-    Ok(World::new(seed, p, scenario))
+    if !(scale >= 1.0 && (128.0 * scale).fract() == 0.0) {
+        return Err(PyValueError::new_err(
+            format!("scale must be >= 1 with 128*scale integral (got {scale})"),
+        ));
+    }
+    Ok(World::new_scaled(seed, p, scenario, scale))
 }
 
 fn apply_physics(w: &mut World, overrides: Option<std::collections::HashMap<String, f64>>) -> PyResult<()> {
@@ -46,10 +55,10 @@ pub struct PyWorld {
 #[pymethods]
 impl PyWorld {
     #[new]
-    #[pyo3(signature = (seed, preset = "default", scenario = None, physics = None))]
+    #[pyo3(signature = (seed, preset = "default", scenario = None, physics = None, scale = 1.0))]
     fn new(seed: u64, preset: &str, scenario: Option<Vec<(i32, i32, i32, i32, i32, i32, u16)>>,
-           physics: Option<std::collections::HashMap<String, f64>>) -> PyResult<Self> {
-        let mut w = make_world(seed, preset, parse_scenario(scenario))?;
+           physics: Option<std::collections::HashMap<String, f64>>, scale: f64) -> PyResult<Self> {
+        let mut w = make_world_scaled(seed, preset, parse_scenario(scenario), scale)?;
         apply_physics(&mut w, physics)?;
         Ok(PyWorld { world: w })
     }

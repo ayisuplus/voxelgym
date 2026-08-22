@@ -83,6 +83,8 @@ class VoxelGymEnv(gym.Env):
     lidar: None | dict — spinning multi-beam LiDAR channel. Keys:
     channels, azimuth, min_elev, max_elev, max_range, and optional
     every (scan every N ticks, default 1), noise_sigma, dropout_p.
+    scale: cells per meter (1.0 default; 2.0 = 0.5 m cells — same physical
+    world, finer voxels; world height becomes 128*scale).
     """
 
     metadata = {"render_modes": []}
@@ -94,11 +96,13 @@ class VoxelGymEnv(gym.Env):
         seed: int = 0,
         render: Literal[False, True] | int = False,
         lidar: dict | None = None,
+        scale: float = 1.0,
     ):
         super().__init__()
         self._task = task
         self._preset = preset or getattr(task, "preset", None) or "default"
         self._seed0 = seed
+        self._scale = float(scale)
         if render is True:
             render = 1
         self._render_every = int(render) if render else 0
@@ -122,7 +126,7 @@ class VoxelGymEnv(gym.Env):
         scenario = None
         if self._task is not None:
             scenario = self._task.scenario(self.np_random)
-        self._w = rs.PyWorld(self._episode_seed, self._preset, scenario)
+        self._w = rs.PyWorld(self._episode_seed, self._preset, scenario, scale=self._scale)
         self._last_frames = None
         self._last_scan = None
         if self._task is not None:

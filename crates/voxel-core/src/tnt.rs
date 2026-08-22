@@ -67,11 +67,14 @@ pub fn tick_tnt(world: &mut World) {
 
 fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
     let tick = world.tick;
-    for dx in -BLAST_R..=BLAST_R {
-        for dy in -BLAST_R..=BLAST_R {
-            for dz in -BLAST_R..=BLAST_R {
+    let s = world.physics.scale;
+    let blast_r = (BLAST_R as f64 * s).round() as i32;
+    let ymax = world.height() - 1;
+    for dx in -blast_r..=blast_r {
+        for dy in -blast_r..=blast_r {
+            for dz in -blast_r..=blast_r {
                 let (x, y, z) = (bx + dx, by + dy, bz + dz);
-                if y < 0 || y > 127 {
+                if y < 0 || y > ymax {
                     continue;
                 }
                 let cell = world.peek_block(x, y, z);
@@ -94,8 +97,10 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
     let (ax, ay, az) = (p[0], p[1] + 0.9, p[2]);
     let (dx, dy, dz) = (ax - (bx as f64 + 0.5), ay - (by as f64 + 0.5), az - (bz as f64 + 0.5));
     let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-    if dist < 5.0 && dist > 1e-6 {
-        let dmg = (DMG_A - DMG_B * dist).floor().max(0.0) as i32;
+    // damage formula is written in meters: convert cell distance back
+    let dist_m = dist / s;
+    if dist_m < 5.0 && dist > 1e-6 {
+        let dmg = (DMG_A - DMG_B * dist_m).floor().max(0.0) as i32;
         if dmg > 0 {
             world.agent.hp -= dmg;
             if world.agent.hp <= 0 {
@@ -103,9 +108,9 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
                 world.agent.dead = true;
             }
         }
-        let k = KNOCKBACK * (1.0 - dist / 5.0);
+        let k = KNOCKBACK * s * (1.0 - dist_m / 5.0);
         world.agent.vel[0] += dx / dist * k;
-        world.agent.vel[1] += dy / dist * k + 0.25 * (1.0 - dist / 5.0);
+        world.agent.vel[1] += dy / dist * k + 0.25 * s * (1.0 - dist_m / 5.0);
         world.agent.vel[2] += dz / dist * k;
     }
 }

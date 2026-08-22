@@ -21,16 +21,18 @@ from .env import ACTION_KEYS
 FRAME = 128
 
 
-def export(task: str, episodes: int, out_dir: str, render: int = 1, seed0: int = 0, epsilon: float = 0.0):
+def export(task: str, episodes: int, out_dir: str, render: int = 1, seed0: int = 0, epsilon: float = 0.0,
+           scale: float = 1.0):
     from .experts import run_episode
 
     os.makedirs(out_dir, exist_ok=True)
     wins = 0
     for i in range(episodes):
-        ok, steps, h, path = run_episode(task, seed0 + i, record_dir=out_dir, render=bool(render), epsilon=epsilon)
+        ok, steps, h, path = run_episode(task, seed0 + i, record_dir=out_dir, render=bool(render),
+                                         epsilon=epsilon, scale=scale)
         wins += ok
         print(f"  ep {i}: {'OK' if ok else 'fail'} {steps} ticks -> {os.path.basename(path or '')}", flush=True)
-    print(f"exported {episodes} episodes of {task} to {out_dir} (expert success {wins}/{episodes})")
+    print(f"exported {episodes} episodes of {task} to {out_dir} (expert success {wins}/{episodes}, scale={scale})")
 
 
 def _decode_frames(rows, key, shape, dtype):
@@ -98,12 +100,13 @@ class VoxelSequenceDataset:
 
 
 def baseline(data: str, steps: int = 50_000, batch: int = 32, seq_len: int = 16, lr: float = 3e-4,
-             limit_steps: int | None = None):
+             limit_steps: int | None = None, channels: str = "rgb"):
     """RSSM-lite latent-prediction baseline vs copy-last-latent. See
     baseline.py for the model. Prints the acceptance ratio."""
     from .baseline import run_baseline
 
-    return run_baseline(data, steps=steps, batch=batch, seq_len=seq_len, lr=lr, limit_steps=limit_steps)
+    return run_baseline(data, steps=steps, batch=batch, seq_len=seq_len, lr=lr,
+                        limit_steps=limit_steps, channels=channels)
 
 
 def main(argv=None) -> int:
@@ -115,6 +118,7 @@ def main(argv=None) -> int:
     e.add_argument("--render", type=int, default=1)
     e.add_argument("--seed0", type=int, default=0)
     e.add_argument("--epsilon", type=float, default=0.0, help="uniform-random action mixture")
+    e.add_argument("--scale", type=float, default=1.0, help="cells per meter (2.0 = 0.5 m cells)")
     e.add_argument("--out", required=True)
     b = sub.add_parser("baseline")
     b.add_argument("--data", required=True)
@@ -122,14 +126,17 @@ def main(argv=None) -> int:
     b.add_argument("--batch", type=int, default=32)
     b.add_argument("--seq-len", type=int, default=16)
     b.add_argument("--limit-steps", type=int, default=None, help="dev override for a quick run")
+    b.add_argument("--channels", choices=["rgb", "rgbd"], default="rgb",
+                   help="ablation axis: rgbd adds the metric-depth channel")
     args = ap.parse_args(argv)
 
     if args.cmd == "export":
-        export(args.task, args.episodes, args.out, render=args.render, seed0=args.seed0, epsilon=args.epsilon)
+        export(args.task, args.episodes, args.out, render=args.render, seed0=args.seed0,
+               epsilon=args.epsilon, scale=args.scale)
         return 0
     if args.cmd == "baseline":
         ratio = baseline(args.data, steps=args.steps, batch=args.batch, seq_len=args.seq_len,
-                         limit_steps=args.limit_steps)
+                         limit_steps=args.limit_steps, channels=args.channels)
         print(f"acceptance: model/copy MSE ratio = {ratio:.3f} (need < 0.9)")
         return 0 if ratio < 0.9 else 1
     return 2

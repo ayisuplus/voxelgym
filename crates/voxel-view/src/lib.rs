@@ -107,6 +107,7 @@ pub fn render_from(
     let max_dist = (RENDER_RADIUS_CHUNKS * 16) as f64;
     let (fwd, right, up) = camera_rays(yaw_deg, pitch_deg);
     let half = (fov_deg / 2.0).to_radians().tan();
+    let world_top = world.height();
 
     // flat chunk-pointer grid over the render radius: DDA steps then cost an
     // array index instead of a HashMap lookup per cell (the dominant cost)
@@ -123,7 +124,7 @@ pub fn render_from(
         if y < 0 {
             return BEDROCK;
         }
-        if y > 127 {
+        if y >= world_top {
             return AIR;
         }
         let gx = x.div_euclid(16) - (ecx - RENDER_RADIUS_CHUNKS);

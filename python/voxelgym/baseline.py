@@ -24,7 +24,7 @@ import numpy as np
 from .datasets import VoxelSequenceDataset
 
 
-def _build_model():
+def _build_model(in_ch: int = 3):
     import torch
     import torch.nn as nn
 
@@ -32,7 +32,7 @@ def _build_model():
         def __init__(self, latent=1024):
             super().__init__()
             self.net = nn.Sequential(
-                nn.Conv2d(3, 32, 5, stride=2, padding=2), nn.ELU(),   # 64->32
+                nn.Conv2d(in_ch, 32, 5, stride=2, padding=2), nn.ELU(),  # 64->32
                 nn.Conv2d(32, 64, 5, stride=2, padding=2), nn.ELU(),  # 32->16
                 nn.Conv2d(64, 128, 3, stride=2, padding=1), nn.ELU(), # 16->8
                 nn.Conv2d(128, 256, 3, stride=2, padding=1), nn.ELU(),# 8->4
@@ -127,51 +127,70 @@ def pack_actions(a: np.ndarray) -> np.ndarray:
     return (ids % 63).astype(np.int64)  # 64-entry embedding table
 
 
-def _load_split(data: str, seq_len: int, split: str, stride: int = 1):
+def _load_split(data: str, seq_len: int, split: str, stride: int = 1, with_depth: bool = False):
     """Decode all episodes of a split into memory (the export is ~100 MB) and
     build the flat window index. `stride` subsamples ticks within a window —
     raw 20-TPS footage is near-static per tick, which makes any copy-last
     baseline unbeatable; stride 4 gives real per-frame motion."""
     ds = VoxelSequenceDataset(data, seq_len=seq_len, split=split)
-    rgbs, acts = [], []
+    rgbs, acts, deps = [], [], []
     for si in range(len(ds.shards)):
-        rgb, actions, _, _ = ds._load(si)
+        rgb, actions, depth, _ = ds._load(si)
         rgbs.append(rgb)
         acts.append(actions)
+        if with_depth:
+            if depth is None:
+                raise ValueError("rgbd ablation needs depth frames in the export")
+            deps.append(depth)
     wins = []
     span = (seq_len - 1) * stride + 1
     for ei, rgb in enumerate(rgbs):
         for s in range(0, len(rgb) - span + 1):
             wins.append((ei, s))
-    return rgbs, acts, wins
+    return rgbs, acts, wins, deps
 
 
 def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, limit_steps: int | None,
-                 stride: int = 4):
+                 stride: int = 4, channels: str = "rgb", transfer_data: str | None = None):
+    """channels: "rgb" (3ch) or "rgbd" (4th channel = metric depth /96 cells).
+    The ablation's whole point: identical data, windows, seed, steps — the
+    ONLY difference is whether the encoder sees depth."""
     import torch
 
+    assert channels in ("rgb", "rgbd")
+    want_depth = channels == "rgbd"
     torch.manual_seed(0)
-    tr_rgb, tr_act, tr_wins = _load_split(data, seq_len, "train", stride)
-    te_rgb, te_act, te_wins = _load_split(data, seq_len, "test", stride)
-    print(f"train windows: {len(tr_wins)}, test windows: {len(te_wins)} (stride={stride})")
+    tr_rgb, tr_act, tr_wins, tr_dep = _load_split(data, seq_len, "train", stride, want_depth)
+    te_rgb, te_act, te_wins, te_dep = _load_split(data, seq_len, "test", stride, want_depth)
+    print(f"train windows: {len(tr_wins)}, test windows: {len(te_wins)} (stride={stride}, channels={channels})")
     if not tr_wins or not te_wins:
         raise RuntimeError("not enough data for the requested seq_len/split")
 
-    def grab(rgbs, acts, wins, idxs):
+    def grab(rgbs, deps, acts, wins, idxs):
         rgb = np.stack([rgbs[ei][s : s + seq_len * stride : stride] for ei, s in idxs])  # (B,T,H,W,3)
         act = np.stack([acts[ei][s : s + seq_len * stride : stride] for ei, s in idxs])  # (B,T,10)
-        return rgb, act
+        if want_depth:
+            dep = np.stack([deps[ei][s : s + seq_len * stride : stride] for ei, s in idxs])
+            dep = dep.astype(np.float32)[..., None] / 96.0  # (B,T,H,W,1) metric cells -> ~[0,1]
+        else:
+            dep = None
+        return rgb, dep, act
 
-    model = _build_model()
+    in_ch = 4 if want_depth else 3
+    model = _build_model(in_ch)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     mse = torch.nn.MSELoss()
     rng = np.random.default_rng(0)
 
-    def forward_lat(x_rgb, act):
-        # (B,T,H,W,3) -> (T,B,3,64,64) -> online/target latents (T,B,1024)
-        x = torch.from_numpy(x_rgb).permute(1, 0, 4, 2, 3).float() / 255.0
+    def forward_lat(x_rgb, x_dep, act):
+        # (B,T,H,W,C) -> (T,B,C,64,64) -> online/target latents (T,B,1024)
+        if want_depth:
+            x_in = np.concatenate([x_rgb.astype(np.float32) / 255.0, x_dep], axis=-1)
+        else:
+            x_in = x_rgb.astype(np.float32) / 255.0
+        x = torch.from_numpy(x_in).permute(1, 0, 4, 2, 3).float()
         T, B = x.shape[0], x.shape[1]
-        x = torch.nn.functional.avg_pool2d(x.reshape(T * B, 3, 128, 128), 2)
+        x = torch.nn.functional.avg_pool2d(x.reshape(T * B, in_ch, 128, 128), 2)
         lat_on = model.online.encoder(x).reshape(T, B, -1)
         with torch.no_grad():
             lat_tg = model.target_encoder(x).reshape(T, B, -1)
@@ -189,8 +208,8 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
         with torch.no_grad():
             for i in range(0, len(te_wins), batch):
                 idxs = te_wins[i : i + batch]
-                rgb, act = grab(te_rgb, te_act, te_wins, idxs)
-                _x, lat_on, lat_tg, a_ids = forward_lat(rgb, act)
+                rgb, dep, act = grab(te_rgb, te_dep, te_act, te_wins, idxs)
+                _x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
                 pred = model.online(lat_on[:-1], a_ids[1:])
                 model_err += torch.nn.functional.mse_loss(pred, lat_tg[1:], reduction="sum").item()
                 copy_err += torch.nn.functional.mse_loss(lat_tg[:-1], lat_tg[1:], reduction="sum").item()
@@ -201,11 +220,11 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
     model.train()
     for step in range(1, n_steps + 1):
         idxs = [tr_wins[i] for i in rng.integers(0, len(tr_wins), batch)]
-        rgb, act = grab(tr_rgb, tr_act, tr_wins, idxs)
-        x, lat_on, lat_tg, a_ids = forward_lat(rgb, act)
+        rgb, dep, act = grab(tr_rgb, tr_dep, tr_act, tr_wins, idxs)
+        x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
         pred = model.online(lat_on[:-1], a_ids[1:])  # predict next latents
         recon = model.decoder(lat_on.reshape(-1, lat_on.shape[-1]))
-        loss = mse(pred, lat_tg[1:]) + 0.5 * torch.nn.functional.mse_loss(recon, x)
+        loss = mse(pred, lat_tg[1:]) + 0.5 * torch.nn.functional.mse_loss(recon, x[:, :3])
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -213,10 +232,33 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
         if step % 100 == 0 or step == 1:
             rate = step / (time.time() - t0)
             print(f"step {step}/{n_steps} loss {loss.item():.4f} ({rate:.1f} steps/s)", flush=True)
-        if step % 2000 == 0:
+        if step % 1000 == 0:
             ratio, me, ce = eval_ratio()
             print(f"  [eval@{step}] ratio={ratio:.3f} model={me:.5f} copy={ce:.5f}", flush=True)
 
     ratio, me, ce = eval_ratio()
-    print(f"test latent MSE: model {me:.5f}  copy {ce:.5f}")
+    print(f"test latent MSE: model {me:.5f}  copy {ce:.5f}  channels={channels}")
+    if transfer_data:
+        # resolution-transfer probe: the frozen model (trained on `data`) is
+        # evaluated on a DIFFERENT dataset's windows (e.g. 0.5 m cells). The
+        # ratio vs copy-last is self-normalizing, so the two numbers are
+        # directly comparable across datasets.
+        tr_rgb, tr_act, tr_wins2, tr_dep = _load_split(transfer_data, seq_len, "test", stride, want_depth)
+        if not tr_wins2:
+            # tiny transfer set: use its train split instead
+            tr_rgb, tr_act, tr_wins2, tr_dep = _load_split(transfer_data, seq_len, "train", stride, want_depth)
+        model.eval()
+        me2 = ce2 = 0.0
+        n2 = 0
+        with torch.no_grad():
+            for i in range(0, len(tr_wins2), batch):
+                idxs = tr_wins2[i : i + batch]
+                rgb, dep, act = grab(tr_rgb, tr_dep, tr_act, tr_wins2, idxs)
+                _x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
+                pred = model.online(lat_on[:-1], a_ids[1:])
+                me2 += torch.nn.functional.mse_loss(pred, lat_tg[1:], reduction="sum").item()
+                ce2 += torch.nn.functional.mse_loss(lat_tg[:-1], lat_tg[1:], reduction="sum").item()
+                n2 += lat_tg[1:].numel()
+        ratio2 = (me2 / n2) / (ce2 / n2)
+        print(f"TRANSFER ({transfer_data}): model {me2/n2:.5f} copy {ce2/n2:.5f} ratio {ratio2:.3f}")
     return ratio

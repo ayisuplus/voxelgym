@@ -67,7 +67,8 @@ impl Action {
 pub fn raycast_target(world: &mut World) -> Option<RayHit> {
     let eye = world.agent.eye();
     let look = world.agent.look();
-    crate::raycast::dda_with(eye, look, REACH, |x, y, z| world.get_block(x, y, z), crate::raycast::blocks_target)
+    let reach = REACH * world.physics.scale;
+    crate::raycast::dda_with(eye, look, reach, |x, y, z| world.get_block(x, y, z), crate::raycast::blocks_target)
 }
 
 pub fn step(world: &mut World, action: &Action) {
