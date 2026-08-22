@@ -52,13 +52,15 @@ class Sim:
     def __init__(self):
         self.task_name = "navigate_to_target"
         self.seed = 0
-        self.speed = 8  # sim ticks per displayed frame
+        self.speed = 2  # sim ticks per displayed frame (low = watchable)
         self.paused = False
         self.policy = "expert"
         self.episode = 0
         self.wins = 0
         self.losses = 0
-        self.reward_hist = deque(maxlen=240)
+        self.results = deque(maxlen=48)  # per-episode {ep, ok, reward}
+        self.last_result = None
+        self.cam_yaw = None  # smoothed chase-cam yaw
         self.env = None
         self.expert = None
         self.last_action = None
@@ -91,11 +93,13 @@ class Sim:
             self.last_action = a
             _, r, term, trunc, _ = self.env.step(a)
             self.ep_reward += r
-            self.reward_hist.append(r)
             if term or trunc:
                 ok = bool(term) and not self.env.world.dead()
                 self.wins += ok
                 self.losses += (not ok)
+                self.results.append(
+                    {"ep": self.episode, "ok": bool(ok), "reward": round(self.ep_reward, 2)})
+                self.last_result = self.results[-1]
                 self.episode += 1
                 self.reset_episode(self.seed + 1)
                 break
@@ -117,7 +121,9 @@ class Sim:
             "hp": w.hp(),
             "pos": [round(v, 1) for v in w.agent_pos()],
             "ep_reward": round(self.ep_reward, 3),
-            "reward_hist": list(self.reward_hist),
+            "results": list(self.results),
+            "last_result": self.last_result,
+            "cam_yaw": self.cam_yaw,
             "action": last_action or {},
             "stage": stage,
             "policy": self.policy,
@@ -133,11 +139,22 @@ CLIENTS: set[WebSocket] = set()
 def build_packet(sim: Sim, hud: dict) -> bytes:
     w = sim.env.world
     rgb, _, seg = w.render()
-    # chase cam: 4 cells behind (MC fwd = (-sin yaw, 0, cos yaw)), 3.2 up
-    x, y, z, yaw = (v for v in w.obs_pose()[:4])
-    yr = math.radians(float(yaw))
-    eye = (float(x) + math.sin(yr) * 4.0, float(y) + 3.2, float(z) - math.cos(yr) * 4.0)
-    chase, _, _ = w.render_pose(eye, float(yaw), 25.0)
+    # chase cam: 4 cells behind (MC fwd = (-sin yaw, 0, cos yaw)), 3.2 up;
+    # yaw smoothed toward the agent's heading so turns don't snap
+    x, y, z, yaw = (float(v) for v in w.obs_pose()[:4])
+    if sim.cam_yaw is None:
+        sim.cam_yaw = yaw
+    dyaw = ((yaw - sim.cam_yaw + 180.0) % 360.0) - 180.0
+    sim.cam_yaw = (sim.cam_yaw + dyaw * 0.3) % 360.0
+    cy = math.radians(sim.cam_yaw)
+    eye = (x + math.sin(cy) * 4.0, y + 3.2, z - math.cos(cy) * 4.0)
+    chase, _, _ = w.render_pose(eye, sim.cam_yaw, 25.0)
+    hud["chase"] = {
+        "eye": [round(v, 3) for v in eye],
+        "yaw": round(sim.cam_yaw, 2),
+        "pitch": 25.0,
+        "agent": [x, y + 0.9, z],
+    }
     rng, _, _ = w.lidar_scan(
         channels=LIDAR["channels"], azimuth_steps=LIDAR["azimuth"],
         min_elev_deg=LIDAR["min_elev"], max_elev_deg=LIDAR["max_elev"],
@@ -210,7 +227,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/tasks")
     async def tasks():
-        return {"tasks": task_names()}
+        out = []
+        for name in task_names():
+            doc = (make_task(name).__doc__ or "").strip().split("\n")[0]
+            out.append({"name": name, "desc": doc})
+        return {"tasks": out}
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):

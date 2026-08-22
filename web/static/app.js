@@ -1,25 +1,25 @@
 /* voxelgym live view client. Binary packet:
- * [u32 LE header_len][header JSON][rgb 128*128*3][chase 128*128*3]
- * [seg 128*128 u16][lidar 16*256 f32]                                 */
+ * [u32 LE header_len][header JSON (4-padded)][rgb 128*128*3]
+ * [chase 128*128*3][seg 128*128 u16][lidar 16*256 f32]            */
 
 const RES = 128, LIDAR_C = 16, LIDAR_A = 256;
 let palette = null;
 const SKY = [0x78, 0xA6, 0xFF];
 
-const conn = document.getElementById("conn");
-const hud = document.getElementById("hud");
-const ctxView = document.getElementById("view").getContext("2d");
-const ctxChase = document.getElementById("chase").getContext("2d");
-const ctxSeg = document.getElementById("seg").getContext("2d");
-const ctxLidar = document.getElementById("lidar").getContext("2d");
-const ctxSpark = document.getElementById("spark").getContext("2d");
+const $ = (id) => document.getElementById(id);
+const conn = $("conn"), hud = $("hud");
+const ctxView = $("view").getContext("2d");
+const ctxChase = $("chase").getContext("2d");
+const ctxSeg = $("seg").getContext("2d");
+const ctxLidar = $("lidar").getContext("2d");
+const ctxBars = $("bars").getContext("2d");
 
 const imgView = ctxView.createImageData(RES, RES);
 const imgChase = ctxChase.createImageData(RES, RES);
 const imgSeg = ctxSeg.createImageData(RES, RES);
 const imgLidar = ctxLidar.createImageData(LIDAR_A, LIDAR_C);
 
-/* expand 3-channel to RGBA */
+/* --- channel painters --- */
 function expand(bytes, off) {
   const src = new Uint8Array(bytes, off, RES * RES * 3);
   const out = new Uint8ClampedArray(RES * RES * 4);
@@ -43,11 +43,9 @@ function putSeg(bytes, off) {
   }
   ctxSeg.putImageData(imgSeg, 0, 0);
 }
-/* turbo-ish blue->green->yellow->red heatmap; range 0 = black.
- * Color saturates at 16 cells so nearby ground reads bright. */
-function heat(r, max = 16) {
+function heat(r) {
   if (r <= 0) return [0, 0, 0];
-  const t = Math.min(1, r / max);
+  const t = Math.min(1, r / 16); // saturate at 16 cells: near ground bright
   return [Math.round(255 * Math.min(1, 2 * t)),
           Math.round(255 * Math.min(1, 2 * (1 - Math.abs(t - 0.5) * 2)) * (t < 0.5 ? t * 2 : 1)),
           Math.round(255 * Math.max(0, 1 - 2 * t))];
@@ -57,7 +55,7 @@ function putLidar(bytes, off) {
   const out = imgLidar.data;
   for (let c = 0; c < LIDAR_C; c++) {
     for (let a = 0; a < LIDAR_A; a++) {
-      // row 0 = lowest elevation -> draw flipped so up is up
+      // channel 0 = lowest elevation -> bottom row
       const src = c * LIDAR_A + a;
       const dst = ((LIDAR_C - 1 - c) * LIDAR_A + a) * 4;
       const col = heat(rng[src]);
@@ -66,20 +64,71 @@ function putLidar(bytes, off) {
   }
   ctxLidar.putImageData(imgLidar, 0, 0);
 }
-function drawSpark(hist) {
-  const w = ctxSpark.canvas.width, h = ctxSpark.canvas.height;
-  ctxSpark.clearRect(0, 0, w, h);
-  if (!hist || hist.length < 2) return;
-  const max = Math.max(1, ...hist.map(Math.abs));
-  ctxSpark.strokeStyle = "#7ee2a8";
-  ctxSpark.beginPath();
-  hist.forEach((r, i) => {
-    const x = (i / (hist.length - 1)) * w;
-    const y = h - 8 - (r / max) * (h - 16);
-    i ? ctxSpark.lineTo(x, y) : ctxSpark.moveTo(x, y);
-  });
-  ctxSpark.stroke();
+
+/* --- agent avatar projected into the chase cam ---
+ * Ports camera_rays(): fwd = [-sin y cos p, -sin p, cos y cos p]
+ * (pitch positive = down); right/up same construction as the renderer. */
+function camBasis(yawDeg, pitchDeg) {
+  const y = yawDeg * Math.PI / 180, p = pitchDeg * Math.PI / 180;
+  const fwd = [-Math.sin(y) * Math.cos(p), -Math.sin(p), Math.cos(y) * Math.cos(p)];
+  let right = [fwd[2], 0, -fwd[0]];
+  const rl = Math.hypot(right[0], right[2]) || 1;
+  right = [right[0] / rl, 0, right[2] / rl];
+  const up = [
+    fwd[1] * right[2] - fwd[2] * right[1],
+    fwd[2] * right[0] - fwd[0] * right[2],
+    fwd[0] * right[1] - fwd[1] * right[0],
+  ];
+  return { fwd, right, up };
 }
+function drawAvatar(chase) {
+  const { fwd, right, up } = camBasis(chase.yaw, chase.pitch);
+  const v = chase.agent.map((c, i) => c - chase.eye[i]);
+  const zc = v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
+  if (zc < 0.5) return;
+  const xc = v[0] * right[0] + v[1] * right[1] + v[2] * right[2];
+  const yc = v[0] * up[0] + v[1] * up[1] + v[2] * up[2];
+  const px = (xc / zc + 1) * RES / 2;          // fov 90 -> half = 1
+  const py = (1 - yc / zc) * RES / 2;
+  const h = (1.8 / zc) * RES / 2;              // agent is 1.8 tall
+  const w = (0.62 / zc) * RES / 2;
+  // body + head: simple steve-like figure (annotation layer, not sim truth)
+  ctxChase.fillStyle = "#e06030";
+  ctxChase.fillRect(px - w / 2, py - h * 0.18, w, h * 0.68);         // body
+  ctxChase.fillStyle = "#e0b080";
+  ctxChase.fillRect(px - w * 0.38, py - h * 0.5, w * 0.76, h * 0.32); // head
+  ctxChase.fillStyle = "#40485a";
+  ctxChase.fillRect(px - w / 2, py + h * 0.32, w * 0.46, h * 0.18);   // legs
+  ctxChase.fillRect(px + w * 0.04, py + h * 0.32, w * 0.46, h * 0.18);
+}
+
+/* --- episode bars + banner --- */
+function drawBars(results) {
+  const W = ctxBars.canvas.width, H = ctxBars.canvas.height;
+  ctxBars.clearRect(0, 0, W, H);
+  if (!results || !results.length) return;
+  const max = Math.max(0.5, ...results.map(r => Math.abs(r.reward)));
+  const bw = Math.max(2, Math.floor(W / 48) - 1);
+  results.slice(-48).forEach((r, i) => {
+    const x = i * (bw + 1);
+    const bh = Math.max(2, (Math.abs(r.reward) / max) * (H - 8));
+    ctxBars.fillStyle = r.ok ? "#3fae6a" : "#c0503f";
+    ctxBars.fillRect(x, H - 4 - bh, bw, bh);
+  });
+}
+let lastEp = -1, bannerTimer = null;
+function showBanner(h) {
+  if (h.episode === lastEp || !h.last_result) return;
+  lastEp = h.episode;
+  const b = $("banner");
+  const ok = h.last_result.ok;
+  b.className = `banner show ${ok ? "win" : "fail"}`;
+  b.textContent = `episode ${h.last_result.ep} — ${ok ? "SUCCESS" : "FAILED"}  ${h.last_result.reward > 0 ? "+" : ""}${h.last_result.reward}`;
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => b.classList.remove("show"), 1400);
+}
+
+/* --- hud --- */
 function fmtAction(a) {
   if (!a || a.move === undefined) return "-";
   const keys = ["move", "jump", "sneak", "yaw", "pitch", "mine", "place", "use", "hotbar", "craft"];
@@ -95,14 +144,18 @@ function show(h) {
     `stage    ${h.stage || "-"}\n` +
     `action   ${fmtAction(h.action)}\n` +
     `policy   ${h.policy}${h.paused ? "  [PAUSED]" : ""}   speed ${h.speed}`;
-  drawSpark(h.reward_hist);
-  // keep controls in sync with server state (page reload, auto-advance)
-  const taskSel = document.getElementById("task");
-  if (document.activeElement !== taskSel && taskSel.value !== h.task) taskSel.value = h.task;
-  const seedIn = document.getElementById("seed");
+  drawBars(h.results);
+  showBanner(h);
+  const taskSel = $("task");
+  if (document.activeElement !== taskSel && taskSel.value !== h.task) {
+    taskSel.value = h.task;
+    showDesc();
+  }
+  const seedIn = $("seed");
   if (document.activeElement !== seedIn && +seedIn.value !== h.seed) seedIn.value = h.seed;
 }
 
+/* --- socket --- */
 let ws;
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -124,14 +177,7 @@ function connect() {
     let off = 4 + hlen;
     putRgb(ctxView, imgView, buf, off); off += RES * RES * 3;
     putRgb(ctxChase, imgChase, buf, off); off += RES * RES * 3;
-    /* chase cam follows the agent every frame (4 behind, 3.2 up, pitch 25
-     * down): the agent projects to a fixed box near center — the renderer
-     * draws blocks only, so overlay the agent as a spectator marker */
-    ctxChase.strokeStyle = "#ff4444";
-    ctxChase.lineWidth = 2;
-    ctxChase.strokeRect(57, 53, 14, 32);
-    ctxChase.beginPath(); ctxChase.moveTo(64, 49); ctxChase.lineTo(64, 53);
-    ctxChase.stroke();
+    if (head.chase) drawAvatar(head.chase);
     putSeg(buf, off); off += RES * RES * 2;
     putLidar(buf, off);
     show(head);
@@ -139,27 +185,31 @@ function connect() {
 }
 connect();
 
-/* controls */
+/* --- controls --- */
 const send = (m) => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
-const taskSel = document.getElementById("task");
+const taskSel = $("task");
+let taskDescs = {};
+function showDesc() { $("taskdesc").textContent = taskDescs[taskSel.value] || ""; }
 fetch("/api/tasks").then(r => r.json()).then(({ tasks }) => {
   for (const t of tasks) {
     const o = document.createElement("option");
-    o.value = o.textContent = t;
+    o.value = t.name; o.textContent = t.name;
     taskSel.appendChild(o);
+    taskDescs[t.name] = t.desc;
   }
+  showDesc();
 });
-taskSel.onchange = () => send({ cmd: "set_task", task: taskSel.value });
-document.getElementById("seed").onchange = (e) => send({ cmd: "set_seed", seed: +e.target.value });
-const speed = document.getElementById("speed");
+taskSel.onchange = () => { send({ cmd: "set_task", task: taskSel.value }); showDesc(); };
+$("seed").onchange = (e) => send({ cmd: "set_seed", seed: +e.target.value });
+const speed = $("speed");
 speed.oninput = () => {
-  document.getElementById("speedv").textContent = speed.value;
+  $("speedv").textContent = speed.value;
   send({ cmd: "set_speed", speed: +speed.value });
 };
-document.getElementById("policy").onchange = (e) => send({ cmd: "set_policy", policy: e.target.value });
-document.getElementById("pause").onclick = (e) => {
+$("policy").onchange = (e) => send({ cmd: "set_policy", policy: e.target.value });
+$("pause").onclick = (e) => {
   const paused = e.target.textContent.includes("resume");
   send({ cmd: paused ? "resume" : "pause" });
   e.target.textContent = paused ? "⏸ pause" : "▶ resume";
 };
-document.getElementById("reset").onclick = () => send({ cmd: "reset" });
+$("reset").onclick = () => send({ cmd: "reset" });
