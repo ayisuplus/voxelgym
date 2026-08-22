@@ -72,9 +72,25 @@ pub fn camera_rays(yaw_deg: f64, pitch_deg: f64) -> ([f64; 3], [f64; 3], [f64; 3
 /// Render from the agent's eye. rayon over rows; every row computes
 /// independently, so parallelism never affects the bytes.
 pub fn render(world: &mut World, width: usize, height: usize, fov_deg: f64) -> Frame {
+    let eye = world.agent.eye();
+    let yaw = world.agent.yaw as f64;
+    let pitch = world.agent.pitch as f64;
+    render_from(world, eye, yaw, pitch, width, height, fov_deg)
+}
+
+/// Render from an arbitrary pose (free camera: third-person, top-down,
+/// surveillance). Same determinism guarantees as `render`.
+pub fn render_from(
+    world: &mut World,
+    eye: [f64; 3],
+    yaw_deg: f64,
+    pitch_deg: f64,
+    width: usize,
+    height: usize,
+    fov_deg: f64,
+) -> Frame {
     // pre-generate the render radius so ray reads never trigger generation
     // mid-render (and to bound ray cost)
-    let eye = world.agent.eye();
     let ecx = (eye[0].floor() as i32).div_euclid(16);
     let ecz = (eye[2].floor() as i32).div_euclid(16);
     for cx in ecx - RENDER_RADIUS_CHUNKS..=ecx + RENDER_RADIUS_CHUNKS {
@@ -84,7 +100,7 @@ pub fn render(world: &mut World, width: usize, height: usize, fov_deg: f64) -> F
     }
 
     let max_dist = (RENDER_RADIUS_CHUNKS * 16) as f64;
-    let (fwd, right, up) = camera_rays(world.agent.yaw as f64, world.agent.pitch as f64);
+    let (fwd, right, up) = camera_rays(yaw_deg, pitch_deg);
     let half = (fov_deg / 2.0).to_radians().tan();
 
     // flat chunk-pointer grid over the render radius: DDA steps then cost an

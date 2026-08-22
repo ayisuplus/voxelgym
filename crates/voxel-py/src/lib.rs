@@ -272,6 +272,53 @@ impl PyWorld {
         )
     }
 
+    /// Free camera render: (origin, yaw_deg, pitch_deg). Positive pitch
+    /// looks down. Same channels as render().
+    #[pyo3(signature = (origin, yaw_deg, pitch_deg, width=128, height=128, fov_deg=90.0))]
+    fn render_pose<'py>(
+        &mut self,
+        py: Python<'py>,
+        origin: (f64, f64, f64),
+        yaw_deg: f64,
+        pitch_deg: f64,
+        width: usize,
+        height: usize,
+        fov_deg: f64,
+    ) -> (
+        Bound<'py, numpy::PyArray3<u8>>,
+        Bound<'py, numpy::PyArray2<f32>>,
+        Bound<'py, numpy::PyArray2<u16>>,
+    ) {
+        let f = py.allow_threads(|| {
+            voxel_view::render_from(
+                &mut self.world,
+                [origin.0, origin.1, origin.2],
+                yaw_deg,
+                pitch_deg,
+                width,
+                height,
+                fov_deg,
+            )
+        });
+        let rgb = ndarray::Array3::from_shape_vec((width, height, 3), f.rgb).unwrap();
+        let depth = ndarray::Array2::from_shape_vec((width, height), f.depth).unwrap();
+        let seg = ndarray::Array2::from_shape_vec((width, height), f.seg).unwrap();
+        (
+            numpy::PyArray3::from_owned_array(py, rgb),
+            numpy::PyArray2::from_owned_array(py, depth),
+            numpy::PyArray2::from_owned_array(py, seg),
+        )
+    }
+
+    /// Block-id -> [r,g,b] palette (row i = block id i; SKY_SEG 0xFFFF is
+    /// handled client-side).
+    fn palette<'py>(&self, py: Python<'py>) -> Bound<'py, numpy::PyArray2<u8>> {
+        let rows: Vec<[u8; 3]> = voxel_core::block::BLOCKS.iter().map(|d| d.color).collect();
+        let flat: Vec<u8> = rows.iter().flat_map(|c| c.iter().copied()).collect();
+        let arr = ndarray::Array2::from_shape_vec((rows.len(), 3), flat).unwrap();
+        numpy::PyArray2::from_owned_array(py, arr)
+    }
+
     /// Spinning multi-beam LiDAR scan from the agent eye (or an explicit
     /// pose for a fixed emitter block). Returns (range, intensity, seg),
     /// each (channels, azimuth_steps); range 0 = no return, seg SKY=0xFFFF.

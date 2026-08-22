@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>voxelgym — live training view</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>voxelgym <span class="sub">live training view</span></h1>
+  <div id="conn" class="pill warn">connecting…</div>
+</header>
+
+<main>
+  <section class="views">
+    <figure>
+      <canvas id="view" width="128" height="128" style="width:384px;height:384px"></canvas>
+      <figcaption>agent view (rgb)</figcaption>
+    </figure>
+    <figure>
+      <canvas id="chase" width="128" height="128" style="width:256px;height:256px"></canvas>
+      <figcaption>chase cam</figcaption>
+    </figure>
+    <figure>
+      <canvas id="seg" width="128" height="128" style="width:256px;height:256px"></canvas>
+      <figcaption>segmentation (ground truth)</figcaption>
+    </figure>
+    <figure>
+      <canvas id="lidar" width="256" height="16" style="width:512px;height:128px"></canvas>
+      <figcaption>lidar range image 16×256</figcaption>
+    </figure>
+  </section>
+
+  <aside>
+    <div id="hud"></div>
+    <canvas id="spark" width="280" height="70"></canvas>
+    <div class="controls">
+      <label>task <select id="task"></select></label>
+      <label>seed <input id="seed" type="number" value="0" style="width:6em"></label>
+      <label>speed <input id="speed" type="range" min="1" max="200" value="8">
+        <span id="speedv">8</span> tick/frame</label>
+      <label>policy
+        <select id="policy">
+          <option value="expert">oracle expert</option>
+          <option value="random">random</option>
+        </select></label>
+      <div class="btns">
+        <button id="pause">⏸ pause</button>
+        <button id="reset">↺ reset</button>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
