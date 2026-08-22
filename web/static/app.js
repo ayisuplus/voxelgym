@@ -101,8 +101,11 @@ function drawAvatar(chase) {
   const yc = v[0] * up[0] + v[1] * up[1] + v[2] * up[2];
   const px = (xc / zc + 1) * RES / 2;          // fov 90 -> half = 1
   const py = (1 - yc / zc) * RES / 2;
-  const h = (1.8 / zc) * RES / 2;              // agent is 1.8 tall
-  const w = (0.62 / zc) * RES / 2;  // body + head: simple steve-like figure (annotation layer, not sim truth)
+  // clamp: a pulled-in camera (tight tunnels) must not fill the frame with
+  // giant avatar rectangles; fade at point-blank range instead
+  const h = Math.min((1.8 / zc) * RES / 2, RES * 0.38);
+  const w = Math.min((0.62 / zc) * RES / 2, RES * 0.16);
+  ctxChase.globalAlpha = zc < 1.5 ? Math.max(0.15, zc / 1.5) : 1.0;
   ctxChase.fillStyle = "#e06030";
   ctxChase.fillRect(px - w / 2, py - h * 0.18, w, h * 0.68);         // body
   ctxChase.fillStyle = "#e0b080";
@@ -110,6 +113,7 @@ function drawAvatar(chase) {
   ctxChase.fillStyle = "#40485a";
   ctxChase.fillRect(px - w / 2, py + h * 0.32, w * 0.46, h * 0.18);   // legs
   ctxChase.fillRect(px + w * 0.04, py + h * 0.32, w * 0.46, h * 0.18);
+  ctxChase.globalAlpha = 1.0;
 }
 
 /* --- episode bars + banner --- */

@@ -178,6 +178,20 @@ def build_packet(sim: Sim, hud: dict) -> bytes:
         sim.cam_yaw = (sim.cam_yaw + dyaw * 0.3) % 360.0
     cy = math.radians(sim.cam_yaw)
     eye = (x + math.sin(cy) * 4.0, y + 3.2, z - math.cos(cy) * 4.0)
+    # camera collision: pull the eye in front of any solid on the line
+    # from the agent center to the camera (standard third-person rule —
+    # without this the camera sits inside walls whenever the agent hugs
+    # one, which read as "穿模" on stream)
+    hx, hy, hz = x, y + 0.9, z
+    dx, dy, dz = eye[0] - hx, eye[1] - hy, eye[2] - hz
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    ux, uy, uz = dx / dist, dy / dist, dz / dist
+    d_hit = w.cast_ray((hx, hy, hz), (ux, uy, uz), dist)
+    if 0.0 <= d_hit < dist:
+        # never beyond the wall face: max() alone could push the eye past
+        # d_hit when the agent hugs a wall (that was the solid-color frame)
+        cam_d = min(max(0.15, d_hit - 0.3), d_hit)
+        eye = (hx + ux * cam_d, hy + uy * cam_d, hz + uz * cam_d)
     chase, _, _ = w.render_pose(eye, sim.cam_yaw, 25.0, width=r, height=r)
     hud["chase"] = {
         "eye": [round(v, 3) for v in eye],

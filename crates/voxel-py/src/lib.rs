@@ -319,6 +319,25 @@ impl PyWorld {
         numpy::PyArray2::from_owned_array(py, arr)
     }
 
+    /// Cast a single DDA ray; returns hit distance in cells, or -1.0.
+    /// Solids only (wires/torchs don't block camera rays).
+    fn cast_ray(
+        &mut self,
+        origin: (f64, f64, f64),
+        dir: (f64, f64, f64),
+        max_dist: f64,
+    ) -> f64 {
+        let w = &mut self.world;
+        let hit = voxel_core::raycast::dda_with(
+            [origin.0, origin.1, origin.2],
+            [dir.0, dir.1, dir.2],
+            max_dist,
+            |x, y, z| w.get_block(x, y, z),
+            |c| voxel_core::block::block_def(voxel_core::block::cell_id(c)).solid,
+        );
+        hit.map(|h| h.dist).unwrap_or(-1.0)
+    }
+
     /// Spinning multi-beam LiDAR scan from the agent eye (or an explicit
     /// pose for a fixed emitter block). Returns (range, intensity, seg),
     /// each (channels, azimuth_steps); range 0 = no return, seg SKY=0xFFFF.
