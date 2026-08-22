@@ -165,7 +165,7 @@ def build_packet(sim: Sim, hud: dict) -> bytes:
     r = sim.res
     hud["res"] = r
     x, y, z, yaw, pitch, _ = (float(v) for v in w.obs_pose())
-    rgb, _, seg = w.render_pose((x, y + 1.62, z), yaw, pitch, width=r, height=r)
+    rgb, _, seg, _ = w.render_pose((x, y + 1.62, z), yaw, pitch, width=r, height=r)
     # chase cam: 4 cells behind (MC fwd = (-sin yaw, 0, cos yaw)), 3.2 up;
     # yaw smoothed toward the agent's heading so turns don't snap
     if sim.cam_yaw is None:
@@ -192,7 +192,7 @@ def build_packet(sim: Sim, hud: dict) -> bytes:
         # d_hit when the agent hugs a wall (that was the solid-color frame)
         cam_d = min(max(0.15, d_hit - 0.3), d_hit)
         eye = (hx + ux * cam_d, hy + uy * cam_d, hz + uz * cam_d)
-    chase, _, _ = w.render_pose(eye, sim.cam_yaw, 25.0, width=r, height=r)
+    chase, _, _, _ = w.render_pose(eye, sim.cam_yaw, 25.0, width=r, height=r)
     hud["chase"] = {
         "eye": [round(v, 3) for v in eye],
         "yaw": round(sim.cam_yaw, 2),

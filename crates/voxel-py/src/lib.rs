@@ -252,7 +252,8 @@ impl PyWorld {
     }
 
     /// Render the agent view: (rgb (128,128,3) u8, depth (128,128) f32 cells,
-    /// seg (128,128) u16 block ids; SKY_SEG=0xFFFF on miss).
+    /// seg (128,128) u16 block ids, normals (128,128,3) f32 unit axis,
+    /// [0,0,0] on sky miss). SKY_SEG=0xFFFF on miss.
     fn render<'py>(
         &mut self,
         py: Python<'py>,
@@ -260,15 +261,18 @@ impl PyWorld {
         Bound<'py, numpy::PyArray3<u8>>,
         Bound<'py, numpy::PyArray2<f32>>,
         Bound<'py, numpy::PyArray2<u16>>,
+        Bound<'py, numpy::PyArray3<f32>>,
     ) {
         let f = py.allow_threads(|| voxel_view::render(&mut self.world, 128, 128, 90.0));
         let rgb = ndarray::Array3::from_shape_vec((128, 128, 3), f.rgb).unwrap();
         let depth = ndarray::Array2::from_shape_vec((128, 128), f.depth).unwrap();
         let seg = ndarray::Array2::from_shape_vec((128, 128), f.seg).unwrap();
+        let nrm = ndarray::Array3::from_shape_vec((128, 128, 3), f.normals).unwrap();
         (
             numpy::PyArray3::from_owned_array(py, rgb),
             numpy::PyArray2::from_owned_array(py, depth),
             numpy::PyArray2::from_owned_array(py, seg),
+            numpy::PyArray3::from_owned_array(py, nrm),
         )
     }
 
@@ -288,6 +292,7 @@ impl PyWorld {
         Bound<'py, numpy::PyArray3<u8>>,
         Bound<'py, numpy::PyArray2<f32>>,
         Bound<'py, numpy::PyArray2<u16>>,
+        Bound<'py, numpy::PyArray3<f32>>,
     ) {
         let f = py.allow_threads(|| {
             voxel_view::render_from(
@@ -303,10 +308,12 @@ impl PyWorld {
         let rgb = ndarray::Array3::from_shape_vec((width, height, 3), f.rgb).unwrap();
         let depth = ndarray::Array2::from_shape_vec((width, height), f.depth).unwrap();
         let seg = ndarray::Array2::from_shape_vec((width, height), f.seg).unwrap();
+        let nrm = ndarray::Array3::from_shape_vec((width, height, 3), f.normals).unwrap();
         (
             numpy::PyArray3::from_owned_array(py, rgb),
             numpy::PyArray2::from_owned_array(py, depth),
             numpy::PyArray2::from_owned_array(py, seg),
+            numpy::PyArray3::from_owned_array(py, nrm),
         )
     }
 

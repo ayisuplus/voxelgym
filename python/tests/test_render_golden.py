@@ -91,15 +91,26 @@ def make_world_with_pose():
 
 def test_render_golden_flat_seg_exact():
     w = make_world_with_pose()
-    rgb, depth, seg = w.render()
+    rgb, depth, seg, normals = w.render()
     # 45 deg pitch, 90 deg FOV: rows 64..127 all hit ground = grass
     ground = seg[64:, :]
     assert (ground == ids.GRASS_BLOCK).all(), "ground region must be all grass"
 
 
+def test_render_golden_normals_exact():
+    w = make_world_with_pose()
+    _, _, seg, normals = w.render()
+    ground_n = normals[64:, :]
+    # every ground pixel's face normal is exactly +y; sky rows are [0,0,0]
+    assert (ground_n == np.array([0.0, 1.0, 0.0], dtype=np.float32)).all(), \
+        "ground normals must be exactly (0,1,0)"
+    sky_rows = (seg[:64, :] == 0xFFFF)
+    assert (normals[:64, :][sky_rows] == 0.0).all(), "sky normals are zero"
+
+
 def test_render_golden_depth_bitwise():
     w = make_world_with_pose()
-    rgb, depth, seg = w.render()
+    rgb, depth, seg, _ = w.render()
     eye = (8.5, 5.0 + 1.62, 8.5)
     fwd, right, up = camera_rays(0.0, 45.0)
     half = math.tan(math.radians(45.0))
@@ -123,10 +134,11 @@ def test_render_golden_depth_bitwise():
 
 def test_render_deterministic_repeat():
     w = make_world_with_pose()
-    _, d1, s1 = w.render()
-    _, d2, s2 = w.render()
+    _, d1, s1, n1 = w.render()
+    _, d2, s2, n2 = w.render()
     np.testing.assert_array_equal(d1, d2)
     np.testing.assert_array_equal(s1, s2)
+    np.testing.assert_array_equal(n1, n2)
 
 
 def test_env_render_channels():
@@ -135,6 +147,7 @@ def test_env_render_channels():
     assert obs["rgb"].shape == (128, 128, 3) and obs["rgb"].dtype == np.uint8
     assert obs["depth"].dtype == np.float16
     assert obs["seg"].dtype == np.uint16
+    assert obs["normals"].shape == (128, 128, 3) and obs["normals"].dtype == np.float32
     assert env.observation_space.contains(obs)
     # render every 5 ticks reuses frames between renders
     env2 = VoxelGymEnv(preset="flat", seed=2, render=5)
@@ -142,7 +155,7 @@ def test_env_render_channels():
     a = {k: 0 for k in ACTION_KEYS}
     a["move"] = 1
     env2.step(a)
-    _, d_a, _ = env2._frames()
+    _, d_a, *_ = env2._frames()
     env2.step(a)  # tick 2: no render (5-interval), same frames
-    _, d_b, _ = env2._frames()
+    _, d_b, *_ = env2._frames()
     np.testing.assert_array_equal(d_a, d_b)

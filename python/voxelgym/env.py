@@ -54,6 +54,9 @@ def observation_space(render: bool = False, lidar: dict | None = None) -> spaces
                 "rgb": spaces.Box(0, 255, (RENDER_RES, RENDER_RES, 3), dtype=np.uint8),
                 "depth": spaces.Box(0, np.inf, (RENDER_RES, RENDER_RES), dtype=np.float16),
                 "seg": spaces.Box(0, 65535, (RENDER_RES, RENDER_RES), dtype=np.uint16),
+                # per-pixel surface normal (unit axis, f32); [0,0,0] on sky.
+                # pixel vector = [r, g, b, depth, block_id, nx, ny, nz]
+                "normals": spaces.Box(-1, 1, (RENDER_RES, RENDER_RES, 3), dtype=np.float32),
             }
         )
     if lidar:
@@ -106,7 +109,7 @@ class VoxelGymEnv(gym.Env):
         self.observation_space = observation_space(self._render_every > 0, self._lidar)
         self._w: rs.PyWorld | None = None
         self._episode_seed = seed
-        self._last_frames: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._last_frames: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
 
     @property
     def world(self) -> rs.PyWorld:
@@ -150,8 +153,8 @@ class VoxelGymEnv(gym.Env):
             "raycast": w.obs_raycast(),
         }
         if self._render_every > 0:
-            rgb, depth, seg = self._frames()
-            obs.update({"rgb": rgb, "depth": depth, "seg": seg})
+            rgb, depth, seg, normals = self._frames()
+            obs.update({"rgb": rgb, "depth": depth, "seg": seg, "normals": normals})
         if self._lidar:
             rng_i, inten, seg = self._scan()
             obs.update({"lidar_range": rng_i, "lidar_intensity": inten, "lidar_seg": seg})
@@ -177,6 +180,6 @@ class VoxelGymEnv(gym.Env):
 
     def _frames(self):
         if self._last_frames is None or self.world.tick() % self._render_every == 0:
-            rgb, depth, seg = self.world.render()
-            self._last_frames = (rgb, depth.astype(np.float16), seg)
+            rgb, depth, seg, normals = self.world.render()
+            self._last_frames = (rgb, depth.astype(np.float16), seg, normals)
         return self._last_frames

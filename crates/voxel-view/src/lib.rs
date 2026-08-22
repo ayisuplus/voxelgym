@@ -40,6 +40,11 @@ pub struct Frame {
     pub depth: Vec<f32>,
     /// Block id per pixel; SKY_SEG on miss.
     pub seg: Vec<u16>,
+    /// Surface normal per pixel, f32 unit axis, row-major 3 channels;
+    /// [0,0,0] on sky miss (a real normal is a unit vector, never zero).
+    /// With rgb+depth+seg this completes the per-pixel vector:
+    /// [r, g, b, depth, block_id, nx, ny, nz].
+    pub normals: Vec<f32>,
 }
 
 /// Camera basis from agent yaw/pitch (degrees, MC convention:
@@ -135,12 +140,14 @@ pub fn render_from(
     let mut rgb = vec![0u8; width * height * 3];
     let mut depth = vec![0f32; width * height];
     let mut seg = vec![0u16; width * height];
+    let mut normals = vec![0f32; width * height * 3];
 
     rgb.par_chunks_mut(width * 3)
         .zip(depth.par_chunks_mut(width))
         .zip(seg.par_chunks_mut(width))
+        .zip(normals.par_chunks_mut(width * 3))
         .enumerate()
-        .for_each(|(py, ((rgb_row, dep_row), seg_row))| {
+        .for_each(|(py, (((rgb_row, dep_row), seg_row), nrm_row))| {
             // camera pinhole: pixel coords to [-1, 1], py=0 is TOP of image
             let sy = 1.0 - 2.0 * (py as f64 + 0.5) / height as f64;
             for px in 0..width {
@@ -162,6 +169,9 @@ pub fn render_from(
                         rgb_row[px * 3 + 2] = (base[2] as f64 * shade) as u8;
                         dep_row[px] = (h.dist * dl) as f32; // cells along the unit ray
                         seg_row[px] = cell_id(h.cell);
+                        nrm_row[px * 3] = h.face[0] as f32;
+                        nrm_row[px * 3 + 1] = h.face[1] as f32;
+                        nrm_row[px * 3 + 2] = h.face[2] as f32;
                     }
                     None => {
                         rgb_row[px * 3] = SKY_COLOR[0];
@@ -169,6 +179,7 @@ pub fn render_from(
                         rgb_row[px * 3 + 2] = SKY_COLOR[2];
                         dep_row[px] = max_dist as f32;
                         seg_row[px] = SKY_SEG;
+                        // normals stay [0,0,0] on miss
                     }
                 }
             }
@@ -180,6 +191,7 @@ pub fn render_from(
         rgb,
         depth,
         seg,
+        normals,
     }
 }
 
