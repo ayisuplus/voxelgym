@@ -11,8 +11,8 @@ A from-scratch voxel physics simulator (no Mojang code or assets, Apache-2.0) wh
 |---|---|---|
 | Throughput | ~55–190 steps/s/instance | **321k steps/s single env, 1.03M on 64 envs** (measured) |
 | Determinism | no — entity tick order, GC, JVM jitter | **bit-exact**: seed + action sequence → identical world hash (xxh3), snapshot/restore mid-episode |
-| Ground truth | pixels only | per-tick voxel window (block ids+states), depth, segmentation, LiDAR range image, full world snapshots |
-| Physics | fixed, closed, 20 TPS lock | **rule-table driven and ablatable** — gravity, fluid spread, gate delay, fall damage… are config fields |
+| Ground truth | pixels only | per-tick voxel window (block ids+states), depth, segmentation, **surface normals**, LiDAR range image, full world snapshots |
+| Physics | fixed, closed, 20 TPS lock | **rule-table driven and ablatable** — gravity, fluid spread, gate delay, fall damage… are config fields; **voxel scale knob**: `scale=2` runs the same physical world at 0.5 m cells |
 | Sensors | screen capture | CPU DDA camera (rgb/depth/seg, exact by construction) + **spinning LiDAR model** (0.4 ms/scan) with seeded noise |
 | Legality | EULA forbids redistribution | Apache-2.0, zero Minecraft assets |
 | Task solvability | unknown | every probe task validates solvability at generation by branch simulation; oracle experts gated ≥ 0.95 |
@@ -47,10 +47,30 @@ Physics implemented with Minecraft's public constants: entity force model (Y→X
 
 ## Verification
 
-- 75 Rust tests (`voxel-core`) + 6 renderer/LiDAR golden tests (`voxel-view`): fluid truth tables, 15-cell power decay, NOT/NOR gate tables, RS latch memory, ring-oscillator period, snapshot replay under oscillation, DDA vs brute force.
-- 52 pytest: env contract, recorder/replay hash match, render golden (seg/depth bit-exact vs analytic DDA), LiDAR golden range, no-clip property tests (5 seeds × 3000 ticks, terminal-velocity fall onto a 1-cell platform).
+- 78 Rust tests (`voxel-core`) + 6 renderer/LiDAR golden tests (`voxel-view`): fluid truth tables, 15-cell power decay, NOT/NOR gate tables, RS latch memory, ring-oscillator period, snapshot replay under oscillation, DDA vs brute force, scale-2 worldgen/physics/snapshot.
+- 53 pytest: env contract, recorder/replay hash match, render golden (seg/depth/normals bit-exact vs analytic DDA), LiDAR golden range, no-clip property tests (5 seeds × 3000 ticks, terminal-velocity fall onto a 1-cell platform).
 - Oracle experts: 13 gated tasks ≥ 0.95 success over 20 episodes; `mine_diamond` tracked (0.80) without a hard gate.
 - Determinism: 20k-tick double run, identical final hash.
+
+## Measured results (this repo runs them)
+
+**Sensor ablation — does metric depth help dynamics learning?** RSSM-lite (BYOL latent prediction), same data/seed/steps, only the input channels differ:
+
+| data | rgb ratio | rgbd ratio | rgbd model MSE vs rgb |
+|---|---|---|---|
+| `collect_log` (pure expert) | 6.31 | 5.80 | −9.8% |
+| `collect_log` ε=0.1 (motion-rich) | 0.777 | **0.772** | −6.6% |
+
+Depth gives a small, consistent gain — and the near-static dataset row shows why data diversity matters (both arms fail the <0.9 gate when footage barely moves; the ε-mixed data passes it).
+
+**Resolution transfer (the 割圆术 experiment)**: a world model trained at 1 m cells, evaluated frozen on the same curriculum at 0.5 m cells (`scale=2`):
+
+| eval set | ratio |
+|---|---|
+| scale-1 test | 1.342 |
+| scale-2 (0.5 m) | 1.423 (**+6%**) |
+
+Learned dynamics largely survive the 2× refinement — the finer-cut world does not break the representation. Caveat: `navigate_to_target` footage is locomotion-only (copy-last is strong, both ratios > 1); interaction-rich transfer data is the follow-up.
 
 ## Quickstart
 
