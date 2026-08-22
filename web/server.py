@@ -132,7 +132,7 @@ class Sim:
         stages = getattr(self.expert, "stages", None)
         idx = getattr(self.expert, "_idx", None)
         if stages and idx is not None and idx < len(stages):
-            stage = f"{idx}: {stages[idx].name}"
+            stage = f"{idx}: {type(stages[idx].op).__name__}"
         return {
             "task": self.task_name,
             "showcase": self.showcase,
@@ -217,11 +217,16 @@ async def sim_loop():
     frame = 1.0 / FPS
     while True:
         t0 = time.perf_counter()
-        if not SIM.paused:
-            SIM.run_frames()
-        if CLIENTS:
-            hud = SIM.hud(SIM.last_action)
-            await broadcast(build_packet(SIM, hud))
+        try:
+            if not SIM.paused:
+                SIM.run_frames()
+            if CLIENTS:
+                hud = SIM.hud(SIM.last_action)
+                await broadcast(build_packet(SIM, hud))
+        except Exception as e:
+            # a demo server must never die mid-presentation: log, pause, continue
+            print(f"[sim_loop] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            await asyncio.sleep(0.5)
         dt = time.perf_counter() - t0
         await asyncio.sleep(max(0.005, frame - dt))
 
