@@ -77,8 +77,9 @@ Learned dynamics largely survive the 2× refinement — the finer-cut world does
 ```bash
 # Rust stable + Python 3.11
 pip install maturin pytest gymnasium numpy pyarrow fastapi "uvicorn[standard]"
+# equivalently: pip install -e "python[dev]"
 maturin develop --release -m crates/voxel-py/Cargo.toml   # or scripts/build_dev.bat
-cargo test --workspace && pytest python/tests -q
+cargo test --workspace && pytest python/tests -q          # also what .github/workflows/ci.yml runs
 
 python -m voxelgym.experts --task smelt_iron --episodes 20   # oracle gate
 python bench/determinism.py --seed 42 --ticks 20000
