@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 
 import numpy as np
 
 from . import ids
-from .env import ACTION_KEYS, VoxelGymEnv
+from .env import ACTION_KEYS, VoxelGymEnv, random_action
 from .tasks import make_task, task_names
 
 
@@ -181,33 +180,6 @@ class CraftOp:
         return act(craft=self.recipe)
 
 
-class WaitOp:
-    def __init__(self, ticks: int):
-        self.left = ticks
-
-    def act(self, world) -> dict:
-        self.left -= 1
-        return act()
-
-
-class NavOp:
-    def __init__(self, pos_fn, tol: float = 3.0):
-        self.pos_fn = pos_fn
-        self.tol = tol
-        self.nav = Navigator()
-
-    def done(self, world) -> bool:
-        p = self.pos_fn()
-        if p is None:
-            return True
-        x, _, z = world.agent_pos()
-        return math.hypot(x - p[0], z - p[2]) <= self.tol
-
-    def act(self, world) -> dict:
-        p = self.pos_fn()
-        return self.nav.toward(world, p[0], p[2])
-
-
 class PlaceOp:
     """Place a held block on the ground ahead; records where it landed."""
 
@@ -295,7 +267,7 @@ class HarvestOp:
 
     def __init__(self, block: int, tool: int | None, drop: int | None = None,
                  radius: int = 32, deep: bool = False, mine_level: int = 13, seed: int = 0,
-                 at_fn=None, prefer_high: bool = False):
+                 at_fn=None):
         self.block = block
         self.tool = tool
         self.drop = block if drop is None else drop
@@ -303,7 +275,6 @@ class HarvestOp:
         self.deep = deep
         self.mine_level = mine_level  # deep mode: descend to this y before strip-mining
         self.at_fn = at_fn  # optional zero-arg callable giving the known cell
-        self.prefer_high = prefer_high
         self.focus: tuple[int, int, int] | None = None
         self.walk = 0
         self.explore_left = 0
@@ -323,12 +294,12 @@ class HarvestOp:
         self._last_count = 0
         self._last_pos: tuple[float, float] | None = None
         self._recover_until = -1
-        self.watchdog_fires = 0
         self._hold: tuple[int, int] | None = None  # held (yaw, pitch)
         self._hold_cell = None  # cell locked under the crosshair
         self._cal: list[tuple[int, int]] = []
         self._ci = 0
         self._cal_focus = None
+        self._open_streak = 0  # consecutive open (non-digging) tunnel ticks
 
     def _nearest(self, world):
         if self.at_fn is not None:
@@ -426,14 +397,10 @@ class HarvestOp:
         fx, fz = fwd_vec(yaw)
         return (int(math.floor(x + 2 * fx)), int(math.floor(y)) - 1, int(math.floor(z + 2 * fz)))
 
-    def act(self, world) -> dict:
-        slot = 0
-        if self.tool is not None and world.count_item(self.tool) > 0:
-            slot = max(world.swap_to_hotbar(self.tool), 0)
-        x, y, z = world.agent_pos()
-        # (mining rays ignore fluids, so submersion needs no special path)
-
-        # ---- watchdog + recovery ----
+    def _watchdog(self, world, x, z):
+        """Progress watchdog + wedge recovery: any tangible gain (item,
+        broken cell, displacement) resets the clock; 200 ticks without it
+        drops all local state and sidesteps to fresh geometry."""
         if self._last_gain < 0:
             self._last_gain = world.tick()
             self._last_count = world.count_item(self.drop)
@@ -452,7 +419,6 @@ class HarvestOp:
             dx, dz = fwd_vec(self.explore_yaw)
             return self.nav.toward(world, x + 15 * dx, z + 15 * dz)
         if world.tick() - self._last_gain > 200:
-            self.watchdog_fires += 1
             # wedged: drop all local state and sidestep briefly; re-approach
             # from different geometry afterwards
             self.focus = None
@@ -464,31 +430,36 @@ class HarvestOp:
             self._last_gain = world.tick()
             dx, dz = fwd_vec(self.explore_yaw)
             return self.nav.toward(world, x + 15 * dx, z + 15 * dz)
+        return None
 
-        # continue mining the focused cell until it breaks
-        if self.focus is not None:
-            fcid = cell_id_of(world, *self.focus)
-            if fcid == ids.AIR or fcid == ids.WATER or fcid == ids.LAVA:
-                # broken — or refilled by a fluid (mining a fluid cell never
-                # progresses; treating the refill as a break avoids the
-                # permanent water-focus wedge)
-                self._last_gain = world.tick()
-                self.focus = None
-                self._hold = None
-                self._hold_cell = None
-                self.walk = 2
-            elif not self._reachable(world, self.focus):
-                self.focus = None  # fell out of the aim cone; re-target
-                self._hold = None
-                self._hold_cell = None
-            else:
-                return self._mine_focus(world, slot)
+    def _continue_focus(self, world, slot):
+        """Mine the focused cell until it breaks (or is refilled by a fluid,
+        which counts as a break — mining a fluid cell never progresses, so
+        treating the refill as a break avoids the permanent water-focus
+        wedge)."""
+        if self.focus is None:
+            return None
+        fcid = cell_id_of(world, *self.focus)
+        if fcid == ids.AIR or fcid == ids.WATER or fcid == ids.LAVA:
+            self._last_gain = world.tick()
+            self.focus = None
+            self._hold = None
+            self._hold_cell = None
+            self.walk = 2
+            return None
+        if not self._reachable(world, self.focus):
+            self.focus = None  # fell out of the aim cone; re-target
+            self._hold = None
+            self._hold_cell = None
+            return None
+        return self._mine_focus(world, slot)
 
-        # stall rescue: (a) short stall while intending to move -> jump-walk
-        # to mount 1-high ledges (no auto-step in the physics contract);
-        # (b) long stall -> mine through the blocking cell, probing lateral
-        # cells too (corner wedges block diagonally). Windowed detection:
-        # collision oscillation defeats per-tick deltas.
+    def _stall_rescue(self, world, x, y, z, slot):
+        """(a) short stall while intending to move -> jump-walk to mount
+        1-high ledges (no auto-step in the physics contract); (b) long
+        stall -> mine through the blocking cell, probing lateral cells too
+        (corner wedges block diagonally). Windowed detection: collision
+        oscillation defeats per-tick deltas."""
         if self.nav.stalled(x, z):
             self._stall += 1
         else:
@@ -513,48 +484,44 @@ class HarvestOp:
             self._stall = 0
             # couldn't mine our way out: ignore unreachable drops for a while
             self.no_drops_until = world.tick() + 100
+        return None
 
-        if self.walk > 0:
-            self.walk -= 1
-            self._last_yaw = self.explore_yaw
-            return act(move=1, yaw=self.explore_yaw, pitch=4, hotbar=slot)
+    def _pursue_drops(self, world, x, y, z, slot):
+        """Drops of the wanted item: poll every tick (cheap). On a target,
+        only grab drops within 4 cells (on the way); targetless, pursue
+        within 16."""
+        if world.tick() < self.no_drops_until:
+            return None
+        drops = world.drops_of(self.drop)
+        cap = 256.0 if self.target is None else 16.0
+        drops = [d for d in drops if (d[0] - x) ** 2 + (d[1] - y) ** 2 + (d[2] - z) ** 2 <= cap]
+        if not drops:
+            return None
+        dx, dy, dz = min(drops, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2 + (p[2] - z) ** 2)
+        if math.hypot(dx - x, dz - z) > 1.0:
+            self._last_yaw = yaw_bucket_toward(dx - x, dz - z)
+            a = self.nav.toward(world, dx, dz, allow_descent=True)
+            a["hotbar"] = slot
+            return a
+        return act(hotbar=slot)  # close enough: pickup radius
 
-        # drops of the wanted item: poll every tick (cheap). On a target,
-        # only grab drops within 4 cells (on the way); targetless, pursue
-        # within 16.
-        if world.tick() >= self.no_drops_until:
-            drops = world.drops_of(self.drop)
-            cap = 256.0 if self.target is None else 16.0
-            drops = [d for d in drops if (d[0] - x) ** 2 + (d[1] - y) ** 2 + (d[2] - z) ** 2 <= cap]
-            if drops:
-                dx, dy, dz = min(drops, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2 + (p[2] - z) ** 2)
-                if math.hypot(dx - x, dz - z) > 1.0:
-                    self._last_yaw = yaw_bucket_toward(dx - x, dz - z)
-                    a = self.nav.toward(world, dx, dz, allow_descent=True)
-                    a["hotbar"] = slot
-                    return a
-                return act(hotbar=slot)  # close enough: pickup radius
-        # block scan is expensive — cadence-gated, and the target is STICKY
+    def _acquire_target(self, world, slot):
+        """Block scan is expensive — cadence-gated, and the target is
+        STICKY. An invalidated target (mined by us / refilled) is dropped
+        for one idle tick before the next scan."""
         if self.target is None and world.tick() - self.target_tick >= 15:
             self.target_tick = world.tick()
             self.target = self._nearest(world)
         if self.target is not None and cell_id_of(world, *self.target) != self.block:
             self.target = None
             return act(hotbar=slot)
-        t = self.target
+        return None
 
-        # direct mine when the target block itself is aimable
-        if t is not None and self._reachable(world, t):
-            self._br = "direct" 
-            self.desc = None
-            self.focus = t
-            return self._mine_focus(world, slot)
-
-        # --- vertical positioning: latched staircase descent ---
-        # Once a descent starts it NEVER re-aims: re-aiming near-vertical
-        # targets makes the shaft flap back into its own tailings. The
-        # descent runs until the target's level is reached, then horizontal
-        # tunneling takes over.
+    def _descend(self, world, t, x, y, z, slot):
+        """Latched staircase descent. Once a descent starts it NEVER
+        re-aims: re-aiming near-vertical targets makes the shaft flap back
+        into its own tailings. The descent runs until the target's level is
+        reached, then horizontal tunneling takes over."""
         t_xz = math.hypot(t[0] + 0.5 - x, t[2] + 0.5 - z) if t is not None else None
         if self.desc is not None and y <= self.desc["target_y"]:
             self.desc = None
@@ -566,103 +533,107 @@ class HarvestOp:
             self.desc = {"yaw": yaw, "walk": 0, "queue": [], "target_y": t[1] + 1}
         if self.desc is None and self.deep and y > self.mine_level and (t is None or t[1] < y - 1.2):
             self.desc = {"yaw": self._last_yaw, "walk": 0, "queue": [], "target_y": self.mine_level}
-        if self.desc is not None:
-            self._br = "desc"
-            d = self.desc
-            abort = False
-            if d["walk"] > 0:
-                # walk until actually stepping down into the notch (a fixed
-                # count could cross the 1-deep notch and end level — that
-                # made trenches, not staircases)
-                d["walk"] -= 1
-                self._last_yaw = d["yaw"]
-                if y <= d.get("walk_from_y", y) - 0.9:
-                    d["walk"] = 0  # descended: build the next column now
-                else:
-                    return act(move=1, yaw=d["yaw"], pitch=4, hotbar=slot)
-            if not d["queue"]:
-                # direction management per level: spiral when nearly above
-                # the target (no overshoot), re-aim when drifted far —
-                # the 3..6 hysteresis band keeps the frozen-yaw benefit
-                if t is not None:
-                    t_xz_now = math.hypot(t[0] + 0.5 - x, t[2] + 0.5 - z)
-                    if t_xz_now < 3.0:
-                        d["yaw"] = (d["yaw"] + 6) % 24
-                    elif t_xz_now > 6.0:
-                        d["yaw"] = yaw_bucket_toward(t[0] - x, t[2] - z)
-                base = self._burrow_cell(world, d["yaw"])
-                # cave guard: a notch opening into a 3+ drop is a cave mouth —
-                # stop descending and work at the current level instead of
-                # falling into the cavern
-                drop = 0
-                for k in range(1, 4):
-                    if cell_id_of(world, base[0], base[1] - k, base[2]) in (ids.AIR, ids.WATER):
-                        drop += 1
-                    else:
-                        break
-                if drop >= 3:
-                    abort = True
-                    self.desc = None
-                else:
-                    col = [(base[0], base[1] + 1, base[2]), base]
-                    d["queue"] = [
-                        c for c in col
-                        if cell_id_of(world, *c) not in (ids.AIR, ids.WATER) and self._reachable(world, c)
-                    ]
-                    if not d["queue"]:
-                        d["walk"] = 10  # bounded; ends early on stepping down
-                        d["walk_from_y"] = y
-                        self._last_yaw = d["yaw"]
-                        return act(move=1, yaw=d["yaw"], pitch=4, hotbar=slot)
-            if abort:
-                pass  # cave guard fired: fall through to approach/tunnel
-            elif d["queue"]:
-                self.focus = d["queue"].pop(0)
-                self.explore_yaw = d["yaw"]
-                if not d["queue"]:
-                    d["walk"] = 10  # column cleared: step into the notch
-                    d["walk_from_y"] = y
-                return self._mine_focus(world, slot)
+        if self.desc is None:
+            return None
+        d = self.desc
+        abort = False
+        if d["walk"] > 0:
+            # walk until actually stepping down into the notch (a fixed
+            # count could cross the 1-deep notch and end level — that
+            # made trenches, not staircases)
+            d["walk"] -= 1
+            self._last_yaw = d["yaw"]
+            if y <= d.get("walk_from_y", y) - 0.9:
+                d["walk"] = 0  # descended: build the next column now
             else:
-                self._last_yaw = d["yaw"]
                 return act(move=1, yaw=d["yaw"], pitch=4, hotbar=slot)
+        if not d["queue"]:
+            # direction management per level: spiral when nearly above
+            # the target (no overshoot), re-aim when drifted far —
+            # the 3..6 hysteresis band keeps the frozen-yaw benefit
+            if t is not None:
+                t_xz_now = math.hypot(t[0] + 0.5 - x, t[2] + 0.5 - z)
+                if t_xz_now < 3.0:
+                    d["yaw"] = (d["yaw"] + 6) % 24
+                elif t_xz_now > 6.0:
+                    d["yaw"] = yaw_bucket_toward(t[0] - x, t[2] - z)
+            base = self._burrow_cell(world, d["yaw"])
+            # cave guard: a notch opening into a 3+ drop is a cave mouth —
+            # stop descending and work at the current level instead of
+            # falling into the cavern
+            drop = 0
+            for k in range(1, 4):
+                if cell_id_of(world, base[0], base[1] - k, base[2]) in (ids.AIR, ids.WATER):
+                    drop += 1
+                else:
+                    break
+            if drop >= 3:
+                abort = True
+                self.desc = None
+            else:
+                col = [(base[0], base[1] + 1, base[2]), base]
+                d["queue"] = [
+                    c for c in col
+                    if cell_id_of(world, *c) not in (ids.AIR, ids.WATER) and self._reachable(world, c)
+                ]
+                if not d["queue"]:
+                    d["walk"] = 10  # bounded; ends early on stepping down
+                    d["walk_from_y"] = y
+                    self._last_yaw = d["yaw"]
+                    return act(move=1, yaw=d["yaw"], pitch=4, hotbar=slot)
+        if abort:
+            return None  # cave guard fired: fall through to approach/tunnel
+        if d["queue"]:
+            self.focus = d["queue"].pop(0)
+            self.explore_yaw = d["yaw"]
+            if not d["queue"]:
+                d["walk"] = 10  # column cleared: step into the notch
+                d["walk_from_y"] = y
+            return self._mine_focus(world, slot)
+        self._last_yaw = d["yaw"]
+        return act(move=1, yaw=d["yaw"], pitch=4, hotbar=slot)
 
-        if t is None:
-            self._br = "explore"
-            # explore: surface wander; strip-mine when underground (nav is
-            # for open terrain — tunnels need the front cells cleared)
-            underground = self._underground(world, x, y, z)
-            if (self.deep and y <= self.mine_level) or underground:
-                yaw = self.explore_yaw
-                fx, fz = fwd_vec(yaw)
-                # flood guard: don't open cells with water directly above
-                for dy in (1, 0):
-                    c = (int(math.floor(x + fx)), int(math.floor(y)) + dy, int(math.floor(z + fz)))
-                    cid = cell_id_of(world, *c)
-                    if cid != ids.AIR and cid != ids.WATER:
-                        self.focus = c
-                        self._open_streak = 0
-                        return self._mine_focus(world, slot)
-                self._open_streak = getattr(self, "_open_streak", 0) + 1
-                if self._open_streak > 10:
-                    c = self._sweep_cell(world, yaw, 1.5)
-                    if c is not None:
-                        self.focus = c
-                        self.explore_yaw = yaw
-                        self._open_streak = 0
-                        return self._mine_focus(world, slot)
-                self._last_yaw = yaw
-                return act(move=1, yaw=yaw, pitch=4, hotbar=slot)
-            if self.explore_left <= 0:
-                self.explore_left = 80
-                self.explore_yaw = int(self.rng.integers(0, 24))
-            self.explore_left -= 1
-            self._last_yaw = self.explore_yaw
-            dx, dz = fwd_vec(self.explore_yaw)
-            a = self.nav.toward(world, x + 30 * dx, z + 30 * dz)
-            a["hotbar"] = slot
-            return a
+    def _explore(self, world, x, y, z, slot):
+        """No target: surface wander; strip-mine when underground (nav is
+        for open terrain — tunnels need the front cells cleared)."""
+        underground = self._underground(world, x, y, z)
+        if (self.deep and y <= self.mine_level) or underground:
+            yaw = self.explore_yaw
+            fx, fz = fwd_vec(yaw)
+            # flood guard: don't open cells with water directly above.
+            # Unlike _approach, the front-cell dig skips the reachable
+            # check — an unreachable focus is dropped by _continue_focus
+            # next tick anyway, and the tolerance keeps wandering cheap.
+            for dy in (1, 0):
+                c = (int(math.floor(x + fx)), int(math.floor(y)) + dy, int(math.floor(z + fz)))
+                cid = cell_id_of(world, *c)
+                if cid != ids.AIR and cid != ids.WATER:
+                    self.focus = c
+                    self._open_streak = 0
+                    return self._mine_focus(world, slot)
+            self._open_streak += 1
+            if self._open_streak > 10:
+                c = self._sweep_cell(world, yaw, 1.5)
+                if c is not None:
+                    self.focus = c
+                    self.explore_yaw = yaw
+                    self._open_streak = 0
+                    return self._mine_focus(world, slot)
+            self._last_yaw = yaw
+            return act(move=1, yaw=yaw, pitch=4, hotbar=slot)
+        if self.explore_left <= 0:
+            self.explore_left = 80
+            self.explore_yaw = int(self.rng.integers(0, 24))
+        self.explore_left -= 1
+        self._last_yaw = self.explore_yaw
+        dx, dz = fwd_vec(self.explore_yaw)
+        a = self.nav.toward(world, x + 30 * dx, z + 30 * dz)
+        a["hotbar"] = slot
+        return a
 
+    def _approach(self, world, t, x, y, z, slot):
+        """Nav in open terrain; strip-tunnel toward the target when
+        underground (nav can't path through solid rock)."""
         # too close horizontally to aim (dead cones below +-60 deg both
         # directions): back off facing the target until it enters the cone
         dx, dz = t[0] + 0.5 - x, t[2] + 0.5 - z
@@ -673,10 +644,6 @@ class HarvestOp:
             yaw = yaw_bucket_toward(dx, dz)
             self._last_yaw = yaw
             return act(move=2, yaw=yaw, pitch=4, hotbar=slot)
-
-        # approach: nav in open terrain; strip-tunnel toward the target when
-        # underground (nav can't path through solid rock)
-        self._br = "approach"
         if in_water(world) and t[1] < y - 0.5:
             # target under water: SINK toward it — the default swim-up
             # response would bob on the surface forever
@@ -695,7 +662,7 @@ class HarvestOp:
                     return self._mine_focus(world, slot)
             # sweep side cells only after a genuinely open stretch — digging
             # every tick doubles the tunneling cost
-            self._open_streak = getattr(self, "_open_streak", 0) + 1
+            self._open_streak += 1
             if self._open_streak > 10:
                 c = self._sweep_cell(world, yaw, 1.5)
                 if c is not None:
@@ -709,6 +676,55 @@ class HarvestOp:
         a = self.nav.toward(world, t[0] + 0.5, t[2] + 0.5, allow_descent=True)
         a["hotbar"] = slot
         return a
+
+    def act(self, world) -> dict:
+        slot = 0
+        if self.tool is not None and world.count_item(self.tool) > 0:
+            slot = max(world.swap_to_hotbar(self.tool), 0)
+        x, y, z = world.agent_pos()
+        # (mining rays ignore fluids, so submersion needs no special path)
+
+        # phase pipeline — first non-None action wins; the order is
+        # semantic: recovery > finish-current-dig > unstick > collect >
+        # acquire > descend > explore/approach
+        a = self._watchdog(world, x, z)
+        if a is not None:
+            return a
+
+        a = self._continue_focus(world, slot)
+        if a is not None:
+            return a
+
+        a = self._stall_rescue(world, x, y, z, slot)
+        if a is not None:
+            return a
+
+        if self.walk > 0:
+            self.walk -= 1
+            self._last_yaw = self.explore_yaw
+            return act(move=1, yaw=self.explore_yaw, pitch=4, hotbar=slot)
+
+        a = self._pursue_drops(world, x, y, z, slot)
+        if a is not None:
+            return a
+
+        a = self._acquire_target(world, slot)
+        if a is not None:
+            return a
+        t = self.target
+
+        # direct mine when the target block itself is aimable
+        if t is not None and self._reachable(world, t):
+            self.desc = None
+            self.focus = t
+            return self._mine_focus(world, slot)
+
+        a = self._descend(world, t, x, y, z, slot)
+        if a is not None:
+            return a
+        if t is None:
+            return self._explore(world, x, y, z, slot)
+        return self._approach(world, t, x, y, z, slot)
 
 
 class SmeltOp:
@@ -803,13 +819,6 @@ class GatherExpert:
         S.append(Stage(lambda w: w.count_item(ids.ITEM_DIAMOND) >= 1,
                        HarvestOp(ids.DIAMOND_ORE, ids.ITEM_IRON_PICKAXE, drop=ids.ITEM_DIAMOND, radius=24, deep=True, mine_level=12, seed=seed)))
         return S
-
-    @staticmethod
-    def _near(pos, world, tol: float = 3.0) -> bool:
-        if pos is None:
-            return False
-        x, _, z = world.agent_pos()
-        return math.hypot(x - (pos[0] + 0.5), z - (pos[2] + 0.5)) <= tol
 
     def act(self, world) -> dict:
         # monotonic progression: a completed stage is never re-entered, so
@@ -1120,19 +1129,9 @@ def run_episode(task_name: str, seed: int, record_dir: str | None = None, render
         a = expert.act(env.world)
         swap = env.world.take_swap()  # inventory-management event from act()
         if epsilon > 0.0 and rng.random() < epsilon:
-            # uniform random action (dataset diversity for world models)
-            a = {
-                "move": int(rng.integers(0, 5)),
-                "jump": int(rng.integers(0, 2)),
-                "sneak": int(rng.integers(0, 2)),
-                "yaw": int(rng.integers(0, 24)),
-                "pitch": int(rng.integers(0, 9)),
-                "mine": int(rng.integers(0, 2)),
-                "place": 0,
-                "use": int(rng.integers(0, 2)),
-                "hotbar": int(rng.integers(0, 9)),
-                "craft": 0,
-            }
+            # uniform random action (dataset diversity for world models);
+            # place/craft stay 0 so random walk can't churn the inventory
+            a = random_action(rng, zero=("place", "craft"))
         obs, r, term, trunc, _ = env.step(a)
         frames = None
         if render:
@@ -1145,7 +1144,7 @@ def run_episode(task_name: str, seed: int, record_dir: str | None = None, render
             break
     final_hash = env.world.hash()
     path = rec.save(final_hash) if rec else None
-    env.close() if hasattr(env, "close") else None
+    env.close()
     return success, steps, final_hash, path
 
 

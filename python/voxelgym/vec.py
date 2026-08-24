@@ -25,7 +25,7 @@ def _worker(pipe, specs: list[tuple[int, str]]):
     while True:
         cmd, payload = pipe.recv()
         if cmd == "step":
-            deads = batch.step_batch([tuple(int(v) for v in row) for row in payload])
+            deads = batch.step_batch_np(payload)
             obs = {
                 "voxels": batch.obs_voxels_batch(),
                 "inventory": batch.obs_inventory_batch(),
@@ -38,7 +38,7 @@ def _worker(pipe, specs: list[tuple[int, str]]):
             # measurement is sim-only (no per-step obs IPC).
             start = time.perf_counter()
             for row in payload:
-                batch.step_batch([tuple(int(v) for v in a) for a in row])
+                batch.step_batch_np(row)
             pipe.send(time.perf_counter() - start)
         elif cmd == "hashes":
             pipe.send(batch.hashes())

@@ -1,20 +1,8 @@
 """Per-tick action+state dump for the frozen harvest situation."""
-import sys
-sys.path.insert(0, "python")
-from voxelgym import ids
-from voxelgym.env import VoxelGymEnv
-from voxelgym.tasks import make_task
-from voxelgym.experts import make_expert
+from _harness import boot, run_until
 
-task = make_task("craft_stone_pickaxe")
-env = VoxelGymEnv(task=task, seed=0)
-env.reset(seed=0)
-ex = make_expert("craft_stone_pickaxe", task, seed=0)
-
-# fast-forward to the stuck region
-for i in range(1490):
-    a = ex.act(env.world)
-    env.step(a)
+task, env, ex = boot("craft_stone_pickaxe", seed=0)
+run_until(env, ex, 1490)
 
 for i in range(40):
     op = ex.stages[6].op

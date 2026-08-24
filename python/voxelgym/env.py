@@ -41,6 +41,18 @@ def action_space() -> spaces.Dict:
     )
 
 
+def random_action(rng: np.random.Generator, zero: tuple[str, ...] = ()) -> dict[str, int]:
+    """Uniform-random action dict drawn from action_space() — the single
+    source for demos and epsilon-mixing, so the bounds can never drift from
+    the contract. Fields named in `zero` are forced to 0 WITHOUT consuming
+    rng draws (keeps per-episode streams comparable across configurations).
+    """
+    return {
+        k: 0 if k in zero else int(rng.integers(0, space.n))
+        for k, space in action_space().items()
+    }
+
+
 def observation_space(render: bool = False, lidar: dict | None = None) -> spaces.Dict:
     d: dict[str, spaces.Space] = {
         "voxels": spaces.Box(0, 65535, (21, 11, 21), dtype=np.uint16),

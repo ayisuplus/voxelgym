@@ -1,19 +1,13 @@
 """Trace T1 expert on a failing seed."""
 import math
 import sys
-sys.path.insert(0, "python")
-from voxelgym.env import VoxelGymEnv
-from voxelgym.tasks import make_task
-from voxelgym.experts import make_expert
+
+from _harness import boot
 
 seed = int(sys.argv[1]) if len(sys.argv) > 1 else 4
-task = make_task("navigate_to_target")
-env = VoxelGymEnv(task=task, seed=seed)
-env.reset(seed=seed)
-ex = make_expert("navigate_to_target", task, seed=seed)
+task, env, ex = boot("navigate_to_target", seed=seed)
 print("target", task.target)
 
-last = None
 for i in range(2400):
     a = ex.act(env.world)
     env.step(a)

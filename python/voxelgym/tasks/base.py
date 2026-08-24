@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -24,4 +26,15 @@ class Task:
         pass
 
     def step_reward(self, world) -> tuple[float, bool]:
+        return 0.0, False
+
+    def reach_reward(self, world, target, tol: float = 1.2) -> tuple[float, bool]:
+        """Terminal +1.0 when the agent is within tol of target (XZ plane).
+
+        Shared by the walk-to-a-pad probe tasks (BuriedEscape, CircuitDoor,
+        PlateDoor, TntClear); BridgeOverLava adds its own height condition.
+        """
+        x, _, z = world.agent_pos()
+        if math.hypot(x - target[0], z - target[2]) <= tol:
+            return 1.0, True
         return 0.0, False

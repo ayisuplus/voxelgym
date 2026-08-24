@@ -4,26 +4,12 @@ pytest; the same laws are also covered by Rust unit tests)."""
 import pytest
 
 import voxelgym_rs as rs
+from conftest import IDLE, cid, run, state
 from voxelgym import ids
 
 
 def R(*a):
     return tuple(a)
-
-IDLE = (0, 0, 0, 0, 4, 0, 0, 0, 0, 0)
-
-
-def cid(cell):
-    return cell & 0xFFF
-
-
-def state(cell):
-    return cell >> 12
-
-
-def run(w, ticks):
-    for _ in range(ticks):
-        w.step(IDLE)
 
 
 def floor_lab(size=20, y=5):

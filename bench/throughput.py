@@ -85,7 +85,8 @@ def main():
 
     ok_single = single >= 5000
     print("single:", "PASS" if ok_single else "BELOW TARGET")
+    return 0 if ok_single else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

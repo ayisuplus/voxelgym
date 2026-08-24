@@ -10,6 +10,16 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = ["gymnasium", "numpy", "pyarrow"]
 
+[project.optional-dependencies]
+# everything the README quickstart lists beyond the runtime deps, plus the
+# web demo; install with: pip install -e python[dev]
+dev = [
+    "maturin",
+    "pytest",
+    "fastapi",
+    "uvicorn[standard]",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["voxelgym*"]

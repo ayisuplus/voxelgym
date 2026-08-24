@@ -36,11 +36,10 @@ from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from voxelgym.experts import make_expert  # noqa: E402
-from voxelgym.env import VoxelGymEnv  # noqa: E402
+from voxelgym.env import VoxelGymEnv, random_action  # noqa: E402
 from voxelgym.tasks import make_task, task_names  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
-RES = 128
 LIDAR = {"channels": 16, "azimuth": 256, "min_elev": -20.0, "max_elev": 10.0,
          "max_range": 48.0, "every": 1}
 FPS = 15
@@ -93,10 +92,7 @@ class Sim:
                 return self.expert.act(world)
             except Exception:
                 pass  # fall through to random on expert errors in demo mode
-        return {k: int(self._rng.integers(0, n)) for k, n in
-                zip(("move", "jump", "sneak", "yaw", "pitch", "mine",
-                     "place", "use", "hotbar", "craft"),
-                    (5, 2, 2, 24, 9, 2, 2, 2, 9, 8))}
+        return random_action(self._rng)
 
     def run_frames(self):
         """Advance `speed` ticks. On episode end: HOLD the terminal frame

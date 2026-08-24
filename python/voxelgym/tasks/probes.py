@@ -220,10 +220,7 @@ class BuriedEscape(Task):
                 world.set_block(x, 6, z, 0)
 
     def step_reward(self, world):
-        x, y, z = world.agent_pos()
-        if math.hypot(x - self.PAD[0], z - self.PAD[2]) <= 1.2:
-            return 1.0, True
-        return 0.0, False
+        return self.reach_reward(world, self.PAD)
 
 
 class CircuitDoor(Task):
@@ -266,10 +263,7 @@ class CircuitDoor(Task):
         world.teleport(5.5, 5.0, 0.5)
 
     def step_reward(self, world):
-        x, y, z = world.agent_pos()
-        if math.hypot(x - self.target[0], z - self.target[2]) <= 1.2:
-            return 1.0, True
-        return 0.0, False
+        return self.reach_reward(world, self.target)
 
 
 class FirebreakJudge(Task):
@@ -360,10 +354,7 @@ class PlateDoor(Task):
         world.teleport(5.5, 5.0, 0.5)
 
     def step_reward(self, world):
-        x, y, z = world.agent_pos()
-        if math.hypot(x - self.TARGET[0], z - self.TARGET[2]) <= 1.2:
-            return 1.0, True
-        return 0.0, False
+        return self.reach_reward(world, self.TARGET)
 
 
 class TntClear(Task):
@@ -394,10 +385,7 @@ class TntClear(Task):
         world.teleport(4.5, 5.0, 0.5)
 
     def step_reward(self, world):
-        x, y, z = world.agent_pos()
-        if math.hypot(x - self.TARGET[0], z - self.TARGET[2]) <= 1.2:
-            return 1.0, True
-        return 0.0, False
+        return self.reach_reward(world, self.TARGET)
 
 
 class LogicProbe(Task):

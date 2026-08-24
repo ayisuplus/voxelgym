@@ -4,22 +4,8 @@ and Physics runtime ablation."""
 import pytest
 
 import voxelgym_rs as rs
+from conftest import IDLE, cid, run, state
 from voxelgym import ids
-
-IDLE = (0, 0, 0, 0, 4, 0, 0, 0, 0, 0)
-
-
-def cid(cell):
-    return cell & 0xFFF
-
-
-def state(cell):
-    return cell >> 12
-
-
-def run(w, ticks):
-    for _ in range(ticks):
-        w.step(IDLE)
 
 
 def test_fire_burnout_and_spread():

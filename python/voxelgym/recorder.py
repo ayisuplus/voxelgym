@@ -53,13 +53,24 @@ def code_version() -> str:
 
 
 class Recorder:
+    """Streams rows to a ParquetWriter in FLUSH_EVERY-row groups — episode
+    RAM stays flat instead of growing with horizon (a rendered 10k-tick
+    episode is >1 GB of binary columns if buffered whole)."""
+
+    FLUSH_EVERY = 1000
+
     def __init__(self, out_dir: str, task: str, seed: int, render: bool = False):
         self.out_dir = out_dir
         self.task = task
         self.seed = seed
         self.render = render
         self.rows: list[dict] = []
+        self._writer: pq.ParquetWriter | None = None
+        self._n = 0
         os.makedirs(out_dir, exist_ok=True)
+        stem = f"{task}_seed{seed}_{int(time.time() * 1000)}"
+        self._stem = stem
+        self._pq_path = os.path.join(out_dir, stem + ".parquet")
 
     def log(self, world, action: tuple, reward: float, done: bool, frames=None, swap: int = 0):
         tick = world.tick()
@@ -72,8 +83,8 @@ class Recorder:
             "swap": int(swap),
             "reward": float(reward),
             "done": bool(done),
-            "voxel_win": world.obs_voxels().tobytes(),
-            "inv": world.obs_inventory().tobytes(),
+            "voxel_win": world.obs_voxels_bytes(),
+            "inv": world.obs_inventory_bytes(),
             "rgb": None,
             "depth": None,
             "seg": None,
@@ -85,20 +96,34 @@ class Recorder:
             row["depth"] = depth.tobytes()
             row["seg"] = seg.tobytes()
         self.rows.append(row)
+        if len(self.rows) >= self.FLUSH_EVERY:
+            self._flush()
+
+    def _flush(self):
+        if not self.rows:
+            return
+        if self._writer is None:
+            self._writer = pq.ParquetWriter(self._pq_path, SCHEMA, compression="zstd")
+        self._writer.write_table(pa.Table.from_pylist(self.rows, schema=SCHEMA))
+        self._n += len(self.rows)
+        self.rows.clear()
 
     def save(self, final_hash: int) -> str:
-        table = pa.Table.from_pylist(self.rows, schema=SCHEMA)
-        stem = f"{self.task}_seed{self.seed}_{int(time.time() * 1000)}"
-        pq_path = os.path.join(self.out_dir, stem + ".parquet")
-        pq.write_table(table, pq_path, compression="zstd")
+        self._flush()
+        if self._writer is None:
+            # zero-row episode: still emit a valid empty shard
+            pq.write_table(SCHEMA.empty_table(), self._pq_path, compression="zstd")
+        else:
+            self._writer.close()
+            self._writer = None
         sidecar = {
             "task": self.task,
             "seed": self.seed,
             "code_version": code_version(),
             "final_hash": final_hash,
-            "steps": len(self.rows),
-            "parquet": os.path.basename(pq_path),
+            "steps": self._n,
+            "parquet": os.path.basename(self._pq_path),
         }
-        with open(os.path.join(self.out_dir, stem + ".json"), "w") as f:
+        with open(os.path.join(self.out_dir, self._stem + ".json"), "w") as f:
             json.dump(sidecar, f, indent=2)
-        return pq_path
+        return self._pq_path
