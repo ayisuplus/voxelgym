@@ -15,15 +15,6 @@ pub const DMG_A: f64 = 14.0;
 pub const DMG_B: f64 = 2.3;
 pub const KNOCKBACK: f64 = 0.8;
 
-const DIRS6: [(i32, i32, i32); 6] = [
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-];
-
 /// Phase 5.5 (after circuits).
 pub fn tick_tnt(world: &mut World) {
     // prime live TNT adjacent to a trigger
@@ -70,6 +61,14 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
     let s = world.physics.scale;
     let blast_r = (BLAST_R as f64 * s).round() as i32;
     let ymax = world.height() - 1;
+    // Load every chunk the blast touches first: destruction must not depend
+    // on whether an observer happened to generate a chunk (peek_block
+    // reports AIR for ungenerated chunks, which would shield their blocks).
+    for cx in (bx - blast_r).div_euclid(16)..=(bx + blast_r).div_euclid(16) {
+        for cz in (bz - blast_r).div_euclid(16)..=(bz + blast_r).div_euclid(16) {
+            world.ensure_chunk(cx, cz);
+        }
+    }
     for dx in -blast_r..=blast_r {
         for dy in -blast_r..=blast_r {
             for dz in -blast_r..=blast_r {

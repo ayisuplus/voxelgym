@@ -21,6 +21,66 @@ pub const SKY_SEG: u16 = 0xFFFF;
 pub const SKY_COLOR: [u8; 3] = [0x78, 0xA6, 0xFF];
 pub const RENDER_RADIUS_CHUNKS: i32 = 6;
 
+/// Flat chunk-pointer grid over the render radius around an origin: DDA
+/// steps cost an array index instead of a HashMap lookup per cell (the
+/// dominant cost). Shared by the renderer and the LiDAR scanner — one
+/// setup, one boundary policy (y<0 bedrock, y>=top air, off-grid air).
+pub(crate) struct ChunkGrid<'w> {
+    grid: Vec<Option<&'w voxel_core::Chunk>>,
+    /// chunk coords of the grid's (0, 0) corner
+    ox: i32,
+    oz: i32,
+    side: usize,
+    top: i32,
+}
+
+impl<'w> ChunkGrid<'w> {
+    pub(crate) fn new(world: &'w mut World, origin: [f64; 3]) -> Self {
+        let ecx = (origin[0].floor() as i32).div_euclid(16);
+        let ecz = (origin[2].floor() as i32).div_euclid(16);
+        // pre-generate the radius so ray reads never trigger generation
+        // mid-pass (and to bound ray cost)
+        for cx in ecx - RENDER_RADIUS_CHUNKS..=ecx + RENDER_RADIUS_CHUNKS {
+            for cz in ecz - RENDER_RADIUS_CHUNKS..=ecz + RENDER_RADIUS_CHUNKS {
+                world.ensure_chunk(cx, cz);
+            }
+        }
+        let side = (2 * RENDER_RADIUS_CHUNKS + 1) as usize;
+        let (ox, oz) = (ecx - RENDER_RADIUS_CHUNKS, ecz - RENDER_RADIUS_CHUNKS);
+        let mut grid: Vec<Option<&voxel_core::Chunk>> = vec![None; side * side];
+        for cz in oz..=ecz + RENDER_RADIUS_CHUNKS {
+            for cx in ox..=ecx + RENDER_RADIUS_CHUNKS {
+                grid[(cz - oz) as usize * side + (cx - ox) as usize] = world.chunks.get(&(cx, cz));
+            }
+        }
+        ChunkGrid { grid, ox, oz, side, top: world.height() }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, x: i32, y: i32, z: i32) -> u16 {
+        if y < 0 {
+            return BEDROCK;
+        }
+        if y >= self.top {
+            return AIR;
+        }
+        let gx = x.div_euclid(16) - self.ox;
+        let gz = z.div_euclid(16) - self.oz;
+        if gx < 0 || gz < 0 || gx >= self.side as i32 || gz >= self.side as i32 {
+            return AIR;
+        }
+        match self.grid[(gz as usize) * self.side + gx as usize] {
+            Some(c) => c.get(x.rem_euclid(16) as usize, y as usize, z.rem_euclid(16) as usize),
+            None => AIR,
+        }
+    }
+
+    /// Max ray distance the grid covers.
+    pub(crate) fn max_dist(&self) -> f64 {
+        (RENDER_RADIUS_CHUNKS * 16) as f64
+    }
+}
+
 /// Face shading by normal: +y top 1.0, -y bottom 0.5, +-z 0.8, +-x 0.6.
 pub fn face_shade(face: [i32; 3]) -> f64 {
     match face {
@@ -94,49 +154,10 @@ pub fn render_from(
     height: usize,
     fov_deg: f64,
 ) -> Frame {
-    // pre-generate the render radius so ray reads never trigger generation
-    // mid-render (and to bound ray cost)
-    let ecx = (eye[0].floor() as i32).div_euclid(16);
-    let ecz = (eye[2].floor() as i32).div_euclid(16);
-    for cx in ecx - RENDER_RADIUS_CHUNKS..=ecx + RENDER_RADIUS_CHUNKS {
-        for cz in ecz - RENDER_RADIUS_CHUNKS..=ecz + RENDER_RADIUS_CHUNKS {
-            world.ensure_chunk(cx, cz);
-        }
-    }
-
-    let max_dist = (RENDER_RADIUS_CHUNKS * 16) as f64;
+    let grid = ChunkGrid::new(world, eye);
+    let max_dist = grid.max_dist();
     let (fwd, right, up) = camera_rays(yaw_deg, pitch_deg);
     let half = (fov_deg / 2.0).to_radians().tan();
-    let world_top = world.height();
-
-    // flat chunk-pointer grid over the render radius: DDA steps then cost an
-    // array index instead of a HashMap lookup per cell (the dominant cost)
-    let side = (2 * RENDER_RADIUS_CHUNKS + 1) as usize;
-    let mut grid: Vec<Option<&voxel_core::Chunk>> = vec![None; side * side];
-    for cz in ecz - RENDER_RADIUS_CHUNKS..=ecz + RENDER_RADIUS_CHUNKS {
-        for cx in ecx - RENDER_RADIUS_CHUNKS..=ecx + RENDER_RADIUS_CHUNKS {
-            let gx = (cx - (ecx - RENDER_RADIUS_CHUNKS)) as usize;
-            let gz = (cz - (ecz - RENDER_RADIUS_CHUNKS)) as usize;
-            grid[gz * side + gx] = world.chunks.get(&(cx, cz));
-        }
-    }
-    let get = |x: i32, y: i32, z: i32| -> u16 {
-        if y < 0 {
-            return BEDROCK;
-        }
-        if y >= world_top {
-            return AIR;
-        }
-        let gx = x.div_euclid(16) - (ecx - RENDER_RADIUS_CHUNKS);
-        let gz = z.div_euclid(16) - (ecz - RENDER_RADIUS_CHUNKS);
-        if gx < 0 || gz < 0 || gx >= side as i32 || gz >= side as i32 {
-            return AIR;
-        }
-        match grid[(gz as usize) * side + gx as usize] {
-            Some(c) => c.get(x.rem_euclid(16) as usize, y as usize, z.rem_euclid(16) as usize),
-            None => AIR,
-        }
-    };
 
     let mut rgb = vec![0u8; width * height * 3];
     let mut depth = vec![0f32; width * height];
@@ -160,7 +181,7 @@ pub fn render_from(
                 ];
                 let dl = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
                 dir = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
-                let hit = dda(eye, dir, max_dist, &get);
+                let hit = dda(eye, dir, max_dist, |x, y, z| grid.get(x, y, z));
                 match hit {
                     Some(h) => {
                         let base = block_def(cell_id(h.cell)).color;

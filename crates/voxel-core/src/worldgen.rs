@@ -116,7 +116,7 @@ impl Biome {
 }
 
 fn biome_noise(seed: u64) -> Fbm<OpenSimplex> {
-    Fbm::<OpenSimplex>::new(((seed ^ 0x51ED_275B_A35A_9E11) as u32)).set_octaves(2)
+    Fbm::<OpenSimplex>::new((seed ^ 0x51ED_275B_A35A_9E11) as u32).set_octaves(2)
 }
 
 /// Biome at column (x, z). Thresholds tuned on the measured 2-octave FBM
@@ -142,7 +142,7 @@ pub fn biome_at_scaled(seed: u64, x: i32, z: i32, s: f64) -> Biome {
 }
 
 fn cave_noise(seed: u64) -> Fbm<OpenSimplex> {
-    Fbm::<OpenSimplex>::new(((seed ^ 0x73BD_A5D1_9E42_6C77) as u32)).set_octaves(2)
+    Fbm::<OpenSimplex>::new((seed ^ 0x73BD_A5D1_9E42_6C77) as u32).set_octaves(2)
 }
 
 /// 3D cave field: carve where the scaled noise exceeds CAVE_T (measured
@@ -300,7 +300,7 @@ fn gen_default(seed: u64, cx: i32, cz: i32, chunk: &mut Chunk, scale: f64) {
             }
             // deep-cave lava pockets: carved floor cells at y<=10s
             if h > si(8) {
-                for y in si(3)..=si(10).min(h - si(4)) {
+                for y in si(3)..=si(CAVE_LAVA_Y).min(h - si(4)) {
                     let cur = chunk.get(lx, y as usize, lz);
                     if cur == AIR && chunk.get(lx, y as usize - 1, lz) != AIR {
                         if hash2(seed ^ 0x1A1A, x, z) % 1000 < 220 {

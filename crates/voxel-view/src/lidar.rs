@@ -23,7 +23,7 @@ use voxel_core::raycast::dda;
 use voxel_core::rng::hash_pos;
 use voxel_core::World;
 
-use crate::{RENDER_RADIUS_CHUNKS, SKY_SEG};
+use crate::{ChunkGrid, SKY_SEG};
 
 #[derive(Clone, Copy, Debug)]
 pub struct LidarConfig {
@@ -97,44 +97,8 @@ pub fn scan(
     yaw_deg: f64,
     frame_idx: u64,
 ) -> Scan {
-    // pre-generate the scan radius (same discipline as the renderer)
-    let ecx = (origin[0].floor() as i32).div_euclid(16);
-    let ecz = (origin[2].floor() as i32).div_euclid(16);
-    for cx in ecx - RENDER_RADIUS_CHUNKS..=ecx + RENDER_RADIUS_CHUNKS {
-        for cz in ecz - RENDER_RADIUS_CHUNKS..=ecz + RENDER_RADIUS_CHUNKS {
-            world.ensure_chunk(cx, cz);
-        }
-    }
-    let bound = (RENDER_RADIUS_CHUNKS * 16) as f64;
-    let max_range = cfg.max_range.min(bound);
-    let world_top = world.height();
-
-    let side = (2 * RENDER_RADIUS_CHUNKS + 1) as usize;
-    let mut grid: Vec<Option<&voxel_core::Chunk>> = vec![None; side * side];
-    for cz in ecz - RENDER_RADIUS_CHUNKS..=ecz + RENDER_RADIUS_CHUNKS {
-        for cx in ecx - RENDER_RADIUS_CHUNKS..=ecx + RENDER_RADIUS_CHUNKS {
-            let gx = (cx - (ecx - RENDER_RADIUS_CHUNKS)) as usize;
-            let gz = (cz - (ecz - RENDER_RADIUS_CHUNKS)) as usize;
-            grid[gz * side + gx] = world.chunks.get(&(cx, cz));
-        }
-    }
-    let get = |x: i32, y: i32, z: i32| -> u16 {
-        if y < 0 {
-            return BEDROCK;
-        }
-        if y >= world_top {
-            return AIR;
-        }
-        let gx = x.div_euclid(16) - (ecx - RENDER_RADIUS_CHUNKS);
-        let gz = z.div_euclid(16) - (ecz - RENDER_RADIUS_CHUNKS);
-        if gx < 0 || gz < 0 || gx >= side as i32 || gz >= side as i32 {
-            return AIR;
-        }
-        match grid[(gz as usize) * side + gx as usize] {
-            Some(c) => c.get(x.rem_euclid(16) as usize, y as usize, z.rem_euclid(16) as usize),
-            None => AIR,
-        }
-    };
+    let grid = ChunkGrid::new(world, origin);
+    let max_range = cfg.max_range.min(grid.max_dist());
 
     let (c_n, a_n) = (cfg.channels, cfg.azimuth_steps);
     let mut range = vec![0f32; c_n * a_n];
@@ -164,8 +128,7 @@ pub fn scan(
                 if cfg.dropout_p > 0.0 && u2 < cfg.dropout_p {
                     continue; // no return: zeros/SKY already in place
                 }
-                let mut g = get;
-                if let Some(h) = dda(origin, dir, max_range, &mut g) {
+                if let Some(h) = dda(origin, dir, max_range, |x, y, z| grid.get(x, y, z)) {
                     let mut r = h.dist;
                     if cfg.noise_sigma > 0.0 {
                         r = (r + noise * cfg.noise_sigma).max(0.0);

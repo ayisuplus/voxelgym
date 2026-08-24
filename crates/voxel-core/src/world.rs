@@ -2,8 +2,9 @@
 //! snapshot/restore/hash (the determinism contract).
 
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 
-use xxhash_rust::xxh3::xxh3_64;
+use xxhash_rust::xxh3::Xxh3;
 
 use crate::block::*;
 use crate::chunk::*;
@@ -16,7 +17,17 @@ use crate::recipe::FurnaceState;
 use crate::rng::Rng;
 use crate::worldgen::{apply_scenario, generate_chunk, Preset, ScenarioSpec};
 
-pub const SNAPSHOT_VERSION: u32 = 5;
+/// Snapshot format v6: per-chunk `touched` flag byte. v5 snapshots still
+/// load (every chunk conservatively marked touched).
+pub const SNAPSHOT_VERSION: u32 = 6;
+
+/// Fixed-seed xxh3 hasher for world-state maps/sets. Unlike `RandomState`,
+/// iteration order is stable across processes (determinism hygiene), and it
+/// is several times faster than SipHash on the small keys used here. Every
+/// consumer that iterates sorts first, so no semantics depend on order.
+pub(crate) type XBuild = BuildHasherDefault<Xxh3>;
+pub(crate) type XMap<K, V> = HashMap<K, V, XBuild>;
+pub(crate) type XSet<K> = std::collections::HashSet<K, XBuild>;
 
 /// Per-tick events for achievement hooks (transient; not part of snapshots —
 /// they are derived from state transitions, never their source).
@@ -39,7 +50,7 @@ pub struct World {
     pub preset: Preset,
     pub physics: Physics,
     pub scenario: ScenarioSpec,
-    pub chunks: HashMap<(i32, i32), Chunk>,
+    pub chunks: XMap<(i32, i32), Chunk>,
     pub tick: u64,
     pub rng: Rng,
     pub agent: Agent,
@@ -49,21 +60,35 @@ pub struct World {
     /// (loose-block support checks). Kept in M1 so semantics are stable.
     pub dirty: Vec<(i32, i32, i32)>,
     pub items: Vec<ItemEntity>,
-    pub furnaces: HashMap<(i32, i32, i32), FurnaceState>,
+    pub furnaces: XMap<(i32, i32, i32), FurnaceState>,
     pub events: Vec<Event>,
     pub next_item_id: u64,
     /// Falling loose-block entities (M3).
     pub falling: Vec<FallingBlock>,
     /// Scheduled support checks: (x, y, z, due_tick).
     pub scheduled_falls: Vec<(i32, i32, i32, u64)>,
+    /// Dedup index over scheduled_falls positions (O(1) membership instead
+    /// of a linear scan per dirty cell). Rebuilt from the vec on restore.
+    pub scheduled_set: XSet<(i32, i32, i32)>,
     /// Fluid cells needing automata attention (M3).
-    pub active_fluids: std::collections::HashSet<(i32, i32, i32)>,
+    pub active_fluids: XSet<(i32, i32, i32)>,
     /// All circuit cells (wire/lever/door) for BFS recompute (M3).
-    pub circuit_cells: std::collections::HashSet<(i32, i32, i32)>,
+    pub circuit_cells: XSet<(i32, i32, i32)>,
+    /// Pressure-plate subset size of circuit_cells — maintained by
+    /// circuit::on_cell_changed, derived (not hashed/snapshotted; rebuilt
+    /// on restore). Plates read the agent position, so they force a
+    /// recompute every tick regardless of block changes.
+    pub plate_count: u32,
+    /// True when the last circuit recompute produced zero state changes:
+    /// the network is at a fixpoint and phase 5 is skipped until a relevant
+    /// dirty cell or a plate. Synchronous semantics make this exact —
+    /// next = f(current), so a zero-update recompute proves all future
+    /// recomputes are no-ops until external input changes. Derived.
+    pub circuit_settled: bool,
     /// Burning cells (fire CA).
-    pub active_fire: std::collections::HashSet<(i32, i32, i32)>,
+    pub active_fire: XSet<(i32, i32, i32)>,
     /// Live TNT cells (blast triggers scan their neighborhoods).
-    pub tnt_cells: std::collections::HashSet<(i32, i32, i32)>,
+    pub tnt_cells: XSet<(i32, i32, i32)>,
     /// Primed explosions: (x, y, z, due_tick).
     pub pending_booms: Vec<(i32, i32, i32, u64)>,
     pub next_falling_id: u64,
@@ -90,7 +115,7 @@ impl World {
             preset,
             physics: Physics::default().spatially_scaled(scale),
             scenario,
-            chunks: HashMap::new(),
+            chunks: XMap::default(),
             tick: 0,
             rng: Rng::new(seed, 1),
             agent: Agent::new([0.5, 8.0 * scale, 0.5], scale),
@@ -98,15 +123,18 @@ impl World {
             place_cooldown: 0,
             dirty: Vec::new(),
             items: Vec::new(),
-            furnaces: HashMap::new(),
+            furnaces: XMap::default(),
             events: Vec::new(),
             next_item_id: 1,
             falling: Vec::new(),
             scheduled_falls: Vec::new(),
-            active_fluids: std::collections::HashSet::new(),
-            circuit_cells: std::collections::HashSet::new(),
-            active_fire: std::collections::HashSet::new(),
-            tnt_cells: std::collections::HashSet::new(),
+            scheduled_set: XSet::default(),
+            active_fluids: XSet::default(),
+            circuit_cells: XSet::default(),
+            plate_count: 0,
+            circuit_settled: false,
+            active_fire: XSet::default(),
+            tnt_cells: XSet::default(),
             pending_booms: Vec::new(),
             next_falling_id: 1,
             last_swap: None,
@@ -146,12 +174,24 @@ impl World {
                     for z in region.z0..=region.z1 {
                         if is_fluid {
                             w.active_fluids.insert((x, y, z));
+                            // scenario lava is an ignition source from tick
+                            // 0 ("evaluated when lava appears" — scenario
+                            // placement IS appearance). Worldgen lava is
+                            // deliberately NOT seeded: that would make
+                            // active_fire depend on chunk loadedness and
+                            // break the hash's observer-independence.
+                            if id == LAVA {
+                                w.active_fire.insert((x, y, z));
+                            }
                         }
                         if is_loose {
                             w.scheduled_falls.push((x, y, z, 1));
+                            w.scheduled_set.insert((x, y, z));
                         }
                         if is_circuit {
-                            w.circuit_cells.insert((x, y, z));
+                            if w.circuit_cells.insert((x, y, z)) && id == PRESSURE_PLATE {
+                                w.plate_count += 1;
+                            }
                         }
                     }
                 }
@@ -237,6 +277,7 @@ impl World {
             let old = c.get(lx, y as usize, lz);
             if old != cell {
                 c.set(lx, y as usize, lz, cell);
+                c.touched = true;
             }
             old
         };
@@ -268,16 +309,51 @@ impl World {
 
     /// 21(x) x 11(y) x 21(z) window centered on the eye column,
     /// y in [eye_y-4, eye_y+6]. Flat vec, index [dx][dy][dz] (dz fastest).
+    ///
+    /// Iterates in chunk-aligned runs: each (dx, z-run) resolves its chunk
+    /// once instead of hashing (cx, cz) per cell — 4851 map lookups become
+    /// at most 27 chunk resolutions plus flat array indexing.
     pub fn voxel_window(&mut self) -> Vec<u16> {
         let eye = self.agent.eye();
         let ex = eye[0].floor() as i32;
         let ey = eye[1].floor() as i32;
         let ez = eye[2].floor() as i32;
+        let height = self.height();
         let mut out = Vec::with_capacity(21 * 11 * 21);
         for dx in -10..=10 {
+            let x = ex + dx;
+            let (cx, lx) = (x.div_euclid(16), x.rem_euclid(16) as usize);
+            // z runs aligned to chunk borders (21 cells span up to 3 chunks)
+            let mut runs = [(0i32, 0i32); 3]; // (chunk_z, dz_start)
+            let mut n_runs = 0;
+            let mut dz = -10;
+            while dz <= 10 {
+                let cz = (ez + dz).div_euclid(16);
+                self.ensure_chunk(cx, cz);
+                runs[n_runs] = (cz, dz);
+                n_runs += 1;
+                dz = ((cz + 1) * 16 - ez).min(11); // first dz of the next chunk
+            }
             for dy in -4..=6 {
-                for dz in -10..=10 {
-                    out.push(self.get_block(ex + dx, ey + dy, ez + dz));
+                let y = ey + dy;
+                if y < WORLD_MIN_Y {
+                    out.extend_from_slice(&[BEDROCK; 21]);
+                    continue;
+                }
+                if y >= height {
+                    out.extend_from_slice(&[AIR; 21]);
+                    continue;
+                }
+                let yu = y as usize;
+                for i in 0..n_runs {
+                    let (cz, dz0) = runs[i];
+                    let dz1 = if i + 1 < n_runs { runs[i + 1].1 - 1 } else { 10 };
+                    let c = &self.chunks[&(cx, cz)];
+                    let mut lz = (ez + dz0).rem_euclid(16) as usize;
+                    for _ in dz0..=dz1 {
+                        out.push(c.get(lx, yu, lz));
+                        lz += 1;
+                    }
                 }
             }
         }
@@ -321,9 +397,8 @@ impl World {
             put_i32(buf, k.0);
             put_i32(buf, k.1);
             let c = &self.chunks[&k];
-            for b in c.blocks.iter() {
-                put_u16(buf, *b);
-            }
+            buf.push(c.touched as u8);
+            push_u16_le_blocks(buf, &c.blocks);
         }
     }
 
@@ -475,9 +550,15 @@ impl World {
         let mut keys: Vec<(i32, i32)> = self.chunks.keys().copied().collect();
         keys.sort_unstable();
         for (cx, cz) in keys {
+            let cur = &self.chunks[&(cx, cz)];
+            if !cur.touched {
+                // pristine: zero diffs by definition — skip the worldgen
+                // re-run this chunk would otherwise cost (FBM noise over
+                // 32k cells per loaded chunk per hash call).
+                continue;
+            }
             let mut pristine = generate_chunk(self.seed, self.preset, cx, cz, self.physics.scale);
             apply_scenario(&mut pristine, cx, cz, &self.scenario);
-            let cur = &self.chunks[&(cx, cz)];
             let mut diffs: Vec<(u32, u16)> = Vec::new();
             for i in 0..cur.blocks.len() {
                 if cur.blocks[i] != pristine.blocks[i] {
@@ -507,7 +588,7 @@ impl World {
             return Err("bad magic".into());
         }
         let version = r.u32()?;
-        if version != SNAPSHOT_VERSION {
+        if !(5..=SNAPSHOT_VERSION).contains(&version) {
             return Err(format!("unsupported snapshot version {version}"));
         }
         let tick = r.u64()?;
@@ -531,15 +612,19 @@ impl World {
 
         let nchunks = r.u32()? as usize;
         let chunk_h = (CHUNK_Y as f64 * physics.scale) as usize;
-        let mut chunks = HashMap::with_capacity(nchunks);
+        let mut chunks = XMap::default();
+        chunks.reserve(nchunks);
         for _ in 0..nchunks {
             let cx = r.i32()?;
             let cz = r.i32()?;
+            // v6 stores the touched flag; v5 chunks are conservatively
+            // treated as touched (hash correctness never depends on it).
+            let touched = if version >= 6 { r.u8()? != 0 } else { true };
             let mut blocks = vec![0u16; CHUNK_X * chunk_h * CHUNK_Z];
             for b in blocks.iter_mut() {
                 *b = r.u16()?;
             }
-            chunks.insert((cx, cz), Chunk { blocks, generated: true, h: chunk_h });
+            chunks.insert((cx, cz), Chunk { blocks, generated: true, h: chunk_h, touched });
         }
 
         let mut pos = [0.0; 3];
@@ -595,7 +680,8 @@ impl World {
             items.push(ItemEntity { id, item, count, pos, vel, age });
         }
         let nfurn = r.u32()? as usize;
-        let mut furnaces = HashMap::with_capacity(nfurn);
+        let mut furnaces = XMap::default();
+        furnaces.reserve(nfurn);
         for _ in 0..nfurn {
             let x = r.i32()?;
             let y = r.i32()?;
@@ -632,9 +718,10 @@ impl World {
             let due = r.u64()?;
             scheduled_falls.push((x, y, z, due));
         }
-        let read_set = |r: &mut Reader| -> Result<std::collections::HashSet<(i32, i32, i32)>, String> {
+        let read_set = |r: &mut Reader| -> Result<XSet<(i32, i32, i32)>, String> {
             let n = r.u32()? as usize;
-            let mut s = std::collections::HashSet::with_capacity(n);
+            let mut s = XSet::default();
+            s.reserve(n);
             for _ in 0..n {
                 s.insert((r.i32()?, r.i32()?, r.i32()?));
             }
@@ -669,6 +756,24 @@ impl World {
         agent.lava_timer = lava_timer;
         agent.fire_timer = fire_timer;
 
+        // Derived caches: rebuilt from the loaded state, never serialized.
+        let scheduled_set: XSet<(i32, i32, i32)> =
+            scheduled_falls.iter().map(|&(x, y, z, _)| (x, y, z)).collect();
+        let height = (CHUNK_Y as f64 * physics.scale) as i32;
+        let mut plate_count = 0u32;
+        for &(x, y, z) in &circuit_cells {
+            if !(WORLD_MIN_Y..height).contains(&y) {
+                continue;
+            }
+            let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+            if let Some(c) = chunks.get(&(cx, cz)) {
+                let cell = c.get(x.rem_euclid(16) as usize, y as usize, z.rem_euclid(16) as usize);
+                if cell_id(cell) == PRESSURE_PLATE {
+                    plate_count += 1;
+                }
+            }
+        }
+
         Ok(World {
             seed,
             preset,
@@ -687,8 +792,11 @@ impl World {
             next_item_id,
             falling,
             scheduled_falls,
+            scheduled_set,
             active_fluids,
             circuit_cells,
+            plate_count,
+            circuit_settled: false,
             active_fire,
             tnt_cells,
             pending_booms,
@@ -730,18 +838,83 @@ impl World {
     }
 
     /// Highest solid block y at column (x, z); -1 if none.
+    /// Resolves the chunk once instead of hashing per cell.
     pub fn surface_y(&mut self, x: i32, z: i32) -> i32 {
-        for y in (0..self.height()).rev() {
-            if self.is_solid(x, y, z) {
+        let height = self.height();
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
+        let c = self.ensure_chunk(cx, cz);
+        for y in (0..height).rev() {
+            let cell = c.get(lx, y as usize, lz);
+            let id = cell_id(cell);
+            if id == DOOR && cell_state(cell) & 1 == 1 {
+                continue; // open door does not collide (is_solid rule)
+            }
+            if block_def(id).solid {
                 return y;
             }
         }
         -1
     }
+
+    /// All cells with this block id within Chebyshev radius of (cx, cy, cz).
+    /// Oracle query for scripted experts. Returns cells in exact
+    /// (x, z, y)-ascending order — experts index into the result.
+    /// Chunk-column scan: one chunk resolution per column instead of a
+    /// hash lookup per cell (~100x fewer lookups at radius 48).
+    pub fn find_blocks(&mut self, id: u16, cx: i32, cy: i32, cz: i32, radius: i32) -> Vec<(i32, i32, i32)> {
+        let r = radius.clamp(0, 48);
+        let (y0, y1) = ((cy - r).max(WORLD_MIN_Y), (cy + r).min(self.height() - 1));
+        let mut out = Vec::new();
+        let (chx0, chx1) = ((cx - r).div_euclid(16), (cx + r).div_euclid(16));
+        let (chz0, chz1) = ((cz - r).div_euclid(16), (cz + r).div_euclid(16));
+        for chx in chx0..=chx1 {
+            for chz in chz0..=chz1 {
+                let chunk = self.ensure_chunk(chx, chz);
+                let (x0, x1) = ((cx - r).max(chx * 16), (cx + r).min(chx * 16 + 15));
+                let (z0, z1) = ((cz - r).max(chz * 16), (cz + r).min(chz * 16 + 15));
+                for x in x0..=x1 {
+                    let lx = x.rem_euclid(16) as usize;
+                    for z in z0..=z1 {
+                        let lz = z.rem_euclid(16) as usize;
+                        for y in y0..=y1 {
+                            if cell_id(chunk.get(lx, y as usize, lz)) == id {
+                                out.push((x, y, z));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // chunk-column iteration is not (x, z, y)-ordered; restore it
+        out.sort_unstable_by_key(|&(x, y, z)| (x, z, y));
+        out
+    }
 }
 
 fn put_u16(b: &mut Vec<u8>, v: u16) {
     b.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Append a u16 cell array as little-endian bytes. On LE targets this is
+/// one memcpy per chunk instead of 32768 two-byte extends.
+pub fn push_u16_le_blocks(buf: &mut Vec<u8>, blocks: &[u16]) {
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: u16 has no padding and every bit pattern is valid, so
+        // reinterpreting &[u16] as &[u8] reads the same object; on LE the
+        // memory layout already equals the to_le_bytes stream.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(blocks.as_ptr() as *const u8, std::mem::size_of_val(blocks))
+        };
+        buf.extend_from_slice(bytes);
+    }
+    #[cfg(target_endian = "big")]
+    {
+        for b in blocks {
+            put_u16(buf, *b);
+        }
+    }
 }
 fn put_u32(b: &mut Vec<u8>, v: u32) {
     b.extend_from_slice(&v.to_le_bytes());

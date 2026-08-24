@@ -12,7 +12,7 @@
 
 use crate::block::*;
 use crate::entity::{tick_agent, MoveInput};
-use crate::raycast::{dda, RayHit, REACH};
+use crate::raycast::{RayHit, REACH};
 use crate::world::{MiningState, World};
 
 /// One action per tick. Field order matches the gymnasium action dict:

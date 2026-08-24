@@ -26,15 +26,6 @@ use std::collections::{BinaryHeap, HashMap};
 use crate::block::*;
 use crate::world::World;
 
-const DIRS6: [(i32, i32, i32); 6] = [
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-];
-
 /// Repeater facing -> output direction vector. bit encoding:
 /// 0:+z, 1:-x, 2:-z, 3:+x (matches placement from agent yaw).
 pub fn repeater_dir(state: u16) -> (i32, i32, i32) {
@@ -63,21 +54,24 @@ fn is_source_on(cell: u16) -> bool {
     }
 }
 
-/// Phase 5. Recompute when this tick's changes touch the circuit — or
-/// every tick while dynamic cells exist: pressure plates (their input is
-/// the agent's position) and torches/repeaters (feedback loops evolve
+/// Phase 5. Recompute when this tick's changes touch the circuit, every
+/// tick while pressure plates exist (their input is the agent's position),
+/// or while the network is not at a fixpoint (feedback loops evolve
 /// autonomously: oscillators change state with no block change).
+///
+/// Synchronous semantics make the fixpoint skip exact: next = f(current),
+/// so a recompute that produces zero updates (gates, wires, plate writes)
+/// proves all later recomputes are no-ops until external input arrives
+/// (a dirty cell in/adjacent to the network, or plate occupancy). A door
+/// deferred by agent occupancy counts as a change — it must resolve the
+/// tick the agent steps away.
 pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
     if world.circuit_cells.is_empty() {
         return;
     }
-    let has_dynamic = world.circuit_cells.iter().any(|&(x, y, z)| {
-        matches!(
-            cell_id(world.peek_block(x, y, z)),
-            PRESSURE_PLATE | RTORCH | REPEATER
-        )
-    });
-    let relevant = has_dynamic
+    let has_plate = world.plate_count > 0;
+    let relevant = has_plate
+        || !world.circuit_settled
         || dirty.iter().any(|&(x, y, z)| {
             if world.circuit_cells.contains(&(x, y, z)) {
                 return true;
@@ -91,10 +85,13 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
     }
     // circuit cells may sit in never-generated chunks (peek_block would
     // report air and truncate propagation at chunk borders)
-    let cells_to_load: Vec<(i32, i32, i32)> = world.circuit_cells.iter().copied().collect();
-    for (x, _, z) in cells_to_load {
+    let mut cells: Vec<(i32, i32, i32)> = world.circuit_cells.iter().copied().collect();
+    cells.sort_unstable();
+    for &(x, _, z) in &cells {
         world.ensure_chunk(x.div_euclid(16), z.div_euclid(16));
     }
+    // any state write this recompute clears the fixpoint
+    let mut changed = false;
 
     let amn = world.agent.aabb_min();
     let amx = world.agent.aabb_max();
@@ -110,12 +107,10 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
     // ---- Phase A: seed the wire network from current gate states ----
     let mut power: HashMap<(i32, i32, i32), u8> = HashMap::new();
     let mut heap: BinaryHeap<(u8, (i32, i32, i32))> = BinaryHeap::new();
-    let mut cells: Vec<(i32, i32, i32)> = world.circuit_cells.iter().copied().collect();
-    cells.sort_unstable();
-    let mut seed = |power: &mut HashMap<(i32, i32, i32), u8>,
-                    heap: &mut BinaryHeap<(u8, (i32, i32, i32))>,
-                    world: &World,
-                    n: (i32, i32, i32)| {
+    let seed = |power: &mut HashMap<(i32, i32, i32), u8>,
+                heap: &mut BinaryHeap<(u8, (i32, i32, i32))>,
+                world: &World,
+                n: (i32, i32, i32)| {
         let nc = world.peek_block(n.0, n.1, n.2);
         if cell_id(nc) == WIRE && power.get(&n).copied().unwrap_or(0) < 15 {
             power.insert(n, 15);
@@ -131,6 +126,7 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
             let cur = cell_state(cell) & 1;
             if cur != on as u16 {
                 world.set_block(x, y, z, make_cell(PRESSURE_PLATE, on as u16));
+                changed = true;
             }
             if on {
                 for d in DIRS6 {
@@ -196,6 +192,7 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
         let p = power.get(&(x, y, z)).copied().unwrap_or(0) as u16;
         if cell_state(cell) != p {
             world.set_block(x, y, z, make_cell(WIRE, p));
+            changed = true;
         }
     }
 
@@ -260,8 +257,11 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
                 if cur != open as u16 {
                     // never close on the agent (elevator-door rule): a
                     // circuit trying to shut a doorway the agent occupies
-                    // is deferred
+                    // is deferred — and the deferral must NOT let the
+                    // network settle, or the door would never shut once
+                    // the agent steps away.
                     if cur == 1 && !open && occupied(x, y, z) {
+                        changed = true;
                         continue;
                     }
                     updates.push(((x, y, z), make_cell(DOOR, open as u16)));
@@ -270,15 +270,25 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
             _ => {}
         }
     }
+    if !updates.is_empty() {
+        changed = true;
+    }
     for ((x, y, z), cell) in updates {
         world.set_block(x, y, z, cell);
     }
+    world.circuit_settled = !changed;
 }
 
 /// Register/unregister circuit cells on block changes (called from set_block).
 pub fn on_cell_changed(world: &mut World, x: i32, y: i32, z: i32, old: u16, new: u16) {
     let old_id = cell_id(old);
     let new_id = cell_id(new);
+    if old_id == PRESSURE_PLATE && new_id != PRESSURE_PLATE {
+        world.plate_count -= 1;
+    }
+    if new_id == PRESSURE_PLATE && old_id != PRESSURE_PLATE {
+        world.plate_count += 1;
+    }
     if is_circuit(old_id) && !is_circuit(new_id) {
         world.circuit_cells.remove(&(x, y, z));
     }

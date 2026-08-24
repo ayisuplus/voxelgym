@@ -27,6 +27,17 @@ pub const fn make_cell(id: u16, state: u16) -> u16 {
     (state << STATE_SHIFT) | id
 }
 
+/// 6-connected neighborhood offsets (face neighbors). Shared by the
+/// fluid/fire/circuit/TNT systems — one table, not four copies.
+pub(crate) const DIRS6: [(i32, i32, i32); 6] = [
+    (1, 0, 0),
+    (-1, 0, 0),
+    (0, 1, 0),
+    (0, -1, 0),
+    (0, 0, 1),
+    (0, 0, -1),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fluid {
     Water,

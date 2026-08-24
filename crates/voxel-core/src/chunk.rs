@@ -24,6 +24,10 @@ pub struct Chunk {
     pub generated: bool,
     /// Height in cells (128 * world scale).
     pub h: usize,
+    /// True once any cell diverged from pristine generation via
+    /// `World::set_block`. `World::hash` re-diffs only touched chunks
+    /// against worldgen; untouched chunks contribute nothing by definition.
+    pub touched: bool,
 }
 
 impl Chunk {
@@ -36,6 +40,7 @@ impl Chunk {
             blocks: vec![0u16; CHUNK_X * h * CHUNK_Z],
             generated: false,
             h,
+            touched: false,
         }
     }
 

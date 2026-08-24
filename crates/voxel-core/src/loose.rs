@@ -41,11 +41,9 @@ pub fn schedule_support_checks(world: &mut World, dirty: &[(i32, i32, i32)]) {
                 continue;
             }
             let due = world.tick + 1;
-            if !world
-                .scheduled_falls
-                .iter()
-                .any(|&(sx, sy, sz, _)| (sx, sy, sz) == (cx, cy, cz))
-            {
+            // O(1) dedup via the side set (a collapse avalanche schedules
+            // thousands of cells per tick; a linear scan here is O(n^2))
+            if world.scheduled_set.insert((cx, cy, cz)) {
                 world.scheduled_falls.push((cx, cy, cz, due));
             }
         }
@@ -82,6 +80,7 @@ pub fn convert_due_falls(world: &mut World) {
             fall_dist: 0.0,
         });
     }
+    world.scheduled_set = keep.iter().map(|&(x, y, z, _)| (x, y, z)).collect();
     world.scheduled_falls = keep;
 }
 

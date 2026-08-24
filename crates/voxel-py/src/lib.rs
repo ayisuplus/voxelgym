@@ -81,17 +81,8 @@ impl PyWorld {
     /// y in [-4, +6] relative to the eye cell.
     fn obs_voxels<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray3<u16>> {
         let flat = self.world.voxel_window();
-        let mut v = vec![vec![vec![0u16; 21]; 11]; 21];
-        let mut i = 0;
-        for dx in 0..21 {
-            for dy in 0..11 {
-                for dz in 0..21 {
-                    v[dx][dy][dz] = flat[i];
-                    i += 1;
-                }
-            }
-        }
-        PyArray3::from_vec3(py, &v).unwrap()
+        let arr = ndarray::Array3::from_shape_vec((21, 11, 21), flat).unwrap();
+        numpy::PyArray3::from_owned_array(py, arr)
     }
 
     /// (36, 2) uint16 (item_id, count).
@@ -101,6 +92,25 @@ impl PyWorld {
             rows.push(vec![s.item, s.count]);
         }
         PyArray2::from_vec2(py, &rows).unwrap()
+    }
+
+    /// Raw (21, 11, 21) u16 window as bytes (C order) — the recorder's hot
+    /// path: skips the numpy roundtrip of obs_voxels().tobytes().
+    fn obs_voxels_bytes<'py>(&mut self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        let flat = self.world.voxel_window();
+        let mut buf = Vec::with_capacity(flat.len() * 2);
+        voxel_core::world::push_u16_le_blocks(&mut buf, &flat);
+        pyo3::types::PyBytes::new(py, &buf)
+    }
+
+    /// Raw (36, 2) u16 inventory as bytes — same recorder fast path.
+    fn obs_inventory_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        let mut buf = Vec::with_capacity(36 * 4);
+        for s in &self.world.agent.inventory.slots {
+            buf.extend_from_slice(&s.item.to_le_bytes());
+            buf.extend_from_slice(&s.count.to_le_bytes());
+        }
+        pyo3::types::PyBytes::new(py, &buf)
     }
 
     /// (6,) float32: x, y, z, yaw deg, pitch deg, on_ground in {0, 1}.
@@ -175,19 +185,13 @@ impl PyWorld {
     /// Oracle query for scripted experts.
     fn find_blocks(&mut self, id: u16, radius: i32) -> Vec<(i32, i32, i32)> {
         let p = self.world.agent.pos;
-        let (cx, cy, cz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
-        let r = radius.clamp(0, 48);
-        let mut out = Vec::new();
-        for x in cx - r..=cx + r {
-            for z in cz - r..=cz + r {
-                for y in (cy - r).max(0)..=(cy + r).min(127) {
-                    if cell_id(self.world.get_block(x, y, z)) == id {
-                        out.push((x, y, z));
-                    }
-                }
-            }
-        }
-        out
+        self.world.find_blocks(
+            id,
+            p[0].floor() as i32,
+            p[1].floor() as i32,
+            p[2].floor() as i32,
+            radius,
+        )
     }
 
     // ---- determinism contract ----
@@ -425,6 +429,22 @@ pub struct PyWorldBatch {
     worlds: Vec<World>,
 }
 
+impl PyWorldBatch {
+    /// Parallel step over all worlds (GIL released); per-world dead flags.
+    fn step_actions(&mut self, py: Python<'_>, acts: Vec<Action>) -> Vec<bool> {
+        py.allow_threads(|| {
+            self.worlds
+                .par_iter_mut()
+                .zip(acts.par_iter())
+                .map(|(w, a)| {
+                    voxel_core::step(w, a);
+                    w.agent.dead
+                })
+                .collect()
+        })
+    }
+}
+
 #[pymethods]
 impl PyWorldBatch {
     #[new]
@@ -444,16 +464,34 @@ impl PyWorldBatch {
     /// Step every world once. Returns per-world dead flags.
     fn step_batch(&mut self, py: Python<'_>, actions: Vec<ActionTuple>) -> Vec<bool> {
         let acts: Vec<Action> = actions.iter().map(to_action).collect();
-        py.allow_threads(|| {
-            self.worlds
-                .par_iter_mut()
-                .zip(acts.par_iter())
-                .map(|(w, a)| {
-                    voxel_core::step(w, a);
-                    w.agent.dead
-                })
-                .collect()
-        })
+        self.step_actions(py, acts)
+    }
+
+    /// Same as step_batch but takes a contiguous (N, 10) uint8 numpy array —
+    /// avoids building N Python tuples (the dominant Python-side cost when
+    /// stepping large batches).
+    fn step_batch_np<'py>(
+        &mut self,
+        py: Python<'py>,
+        actions: numpy::PyReadonlyArray2<'py, u8>,
+    ) -> PyResult<Vec<bool>> {
+        let arr = actions.as_array();
+        if arr.ndim() != 2 || arr.ncols() != 10 {
+            return Err(PyValueError::new_err("actions must have shape (N, 10)"));
+        }
+        let mut acts = Vec::with_capacity(arr.nrows());
+        for row in arr.rows() {
+            let mut parts = [0u8; 10];
+            if let Some(s) = row.as_slice() {
+                parts.copy_from_slice(s);
+            } else {
+                for (p, v) in parts.iter_mut().zip(row.iter()) {
+                    *p = *v;
+                }
+            }
+            acts.push(Action::from_parts(&parts));
+        }
+        Ok(self.step_actions(py, acts))
     }
 
     /// Stacked (N, 21, 11, 21) uint16 voxel windows.

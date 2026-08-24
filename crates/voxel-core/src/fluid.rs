@@ -16,10 +16,8 @@
 //! Determinism: cells processed in sorted order; changes collected then
 //! applied per pass.
 
-use std::collections::HashSet;
-
 use crate::block::*;
-use crate::world::World;
+use crate::world::{World, XSet};
 
 pub const WATER_PERIOD: u64 = 5;
 pub const LAVA_PERIOD: u64 = 30;
@@ -27,14 +25,6 @@ pub const WATER_MAX: u16 = 7;
 pub const LAVA_MAX: u16 = 3;
 pub const FALLING: u16 = 8;
 
-const DIRS6: [(i32, i32, i32); 6] = [
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-];
 const DIRS4: [(i32, i32, i32); 4] = [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)];
 
 fn max_spread(world: &World, f: Fluid) -> u16 {
@@ -115,7 +105,7 @@ fn recompute(world: &World, x: i32, y: i32, z: i32, f: Fluid, cur_state: u16) ->
 pub fn tick_fluids(world: &mut World, dirty: &[(i32, i32, i32)]) {
     // seed active set from this tick's changes
     for &(x, y, z) in dirty {
-        for (dx, dy, dz) in [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+        for (dx, dy, dz) in [(0, 0, 0)].into_iter().chain(DIRS6) {
             let c = (x + dx, y + dy, z + dz);
             if block_def(cell_id(world.peek_block(c.0, c.1, c.2))).fluid.is_some() {
                 world.active_fluids.insert(c);
@@ -141,9 +131,17 @@ pub fn tick_fluids(world: &mut World, dirty: &[(i32, i32, i32)]) {
     cells.sort_unstable();
 
     let mut changes: Vec<(i32, i32, i32, u16)> = Vec::new();
-    let mut keep_active: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut keep_active: XSet<(i32, i32, i32)> = XSet::default();
 
     // ---- pass 1: recompute existing fluid cells ----
+    //
+    // Wake/sleep discipline: a cell whose neighborhood did not change
+    // recomputes to its current state by definition (recompute reads only
+    // 6-neighbors, the cell below, and 4 horizontal sources), so stable
+    // cells are dropped from the active set — equilibrium fluid bodies stop
+    // consuming ticks. Reactivation is guaranteed by (a) dirty-seeding
+    // above (any set_block in the neighborhood reinserts the cell next
+    // tick) and (b) 6-neighbor insertion whenever a cell changes or drains.
     for &(x, y, z) in &cells {
         let cell = world.peek_block(x, y, z);
         let id = cell_id(cell);
@@ -163,10 +161,8 @@ pub fn tick_fluids(world: &mut World, dirty: &[(i32, i32, i32)]) {
                     for (dx, dy, dz) in DIRS6 {
                         keep_active.insert((x + dx, y + dy, z + dz));
                     }
-                } else {
-                    // stable for now; stay active only if it can still expand
-                    keep_active.insert((x, y, z));
                 }
+                // else: stable — sleep until a neighbor change wakes us.
             }
             None => {
                 changes.push((x, y, z, AIR));
@@ -246,7 +242,7 @@ pub fn tick_fluids(world: &mut World, dirty: &[(i32, i32, i32)]) {
     }
 
     // prune: cells that are neither fluid nor adjacent to fluid fall out
-    let mut final_active: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut final_active: XSet<(i32, i32, i32)> = XSet::default();
     for c in keep_active {
         let cell = world.peek_block(c.0, c.1, c.2);
         if block_def(cell_id(cell)).fluid.is_some() {
