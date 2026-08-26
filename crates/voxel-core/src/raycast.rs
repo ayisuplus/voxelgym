@@ -1,8 +1,11 @@
-//! Amanatides & Woo DDA voxel traversal for targeting (max reach 4.5 cells).
+//! Amanatides & Woo DDA voxel traversal. The low-level traversal works in
+//! cell units; `tick::raycast_target` applies the world's scale and exposes
+//! the physical 4.5-meter targeting contract.
 //! Stops at any cell where `blocks_ray(cell)` is true.
 
 use crate::block::*;
 
+/// Physical targeting reach in meters.
 pub const REACH: f64 = 4.5;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -37,9 +40,21 @@ pub fn dda_with<G: FnMut(i32, i32, i32) -> u16, H: Fn(u16) -> bool>(
     let step_z = if dir[2] > 0.0 { 1 } else { -1 };
 
     let inf = f64::INFINITY;
-    let t_delta_x = if dir[0] != 0.0 { (1.0 / dir[0]).abs() } else { inf };
-    let t_delta_y = if dir[1] != 0.0 { (1.0 / dir[1]).abs() } else { inf };
-    let t_delta_z = if dir[2] != 0.0 { (1.0 / dir[2]).abs() } else { inf };
+    let t_delta_x = if dir[0] != 0.0 {
+        (1.0 / dir[0]).abs()
+    } else {
+        inf
+    };
+    let t_delta_y = if dir[1] != 0.0 {
+        (1.0 / dir[1]).abs()
+    } else {
+        inf
+    };
+    let t_delta_z = if dir[2] != 0.0 {
+        (1.0 / dir[2]).abs()
+    } else {
+        inf
+    };
 
     let mut t_max_x = if dir[0] != 0.0 {
         let bound = if step_x > 0 { x as f64 + 1.0 } else { x as f64 };
@@ -63,7 +78,14 @@ pub fn dda_with<G: FnMut(i32, i32, i32) -> u16, H: Fn(u16) -> bool>(
     // Origin cell first (face = zero: entered from inside).
     let cell = get(x, y, z);
     if hit(cell) {
-        return Some(RayHit { x, y, z, cell, dist: 0.0, face: [0, 0, 0] });
+        return Some(RayHit {
+            x,
+            y,
+            z,
+            cell,
+            dist: 0.0,
+            face: [0, 0, 0],
+        });
     }
 
     #[allow(unused_assignments)]
@@ -92,7 +114,14 @@ pub fn dda_with<G: FnMut(i32, i32, i32) -> u16, H: Fn(u16) -> bool>(
         }
         let cell = get(x, y, z);
         if hit(cell) {
-            return Some(RayHit { x, y, z, cell, dist: t, face });
+            return Some(RayHit {
+                x,
+                y,
+                z,
+                cell,
+                dist: t,
+                face,
+            });
         }
     }
 }
@@ -124,7 +153,12 @@ mod tests {
 
     /// Brute-force reference: sample the ray densely, report the first
     /// non-air cell entered. Only meaningful away from exact face ties.
-    fn brute(world: &mut World, origin: [f64; 3], dir: [f64; 3], max_dist: f64) -> Option<(i32, i32, i32, u16)> {
+    fn brute(
+        world: &mut World,
+        origin: [f64; 3],
+        dir: [f64; 3],
+        max_dist: f64,
+    ) -> Option<(i32, i32, i32, u16)> {
         let steps = (max_dist * 1000.0) as usize;
         let mut last = (
             origin[0].floor() as i32,
@@ -138,7 +172,11 @@ mod tests {
                 origin[1] + dir[1] * t,
                 origin[2] + dir[2] * t,
             ];
-            let c = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+            let c = (
+                p[0].floor() as i32,
+                p[1].floor() as i32,
+                p[2].floor() as i32,
+            );
             if c != last {
                 let cell = world.get_block(c.0, c.1, c.2);
                 if blocks_ray(cell) {
@@ -170,11 +208,7 @@ mod tests {
             // brute-force reference ambiguous at face boundaries
             let theta = rng.next_f64() * std::f64::consts::TAU;
             let phi = (rng.next_f64() * 2.0 - 1.0).acos();
-            let dir = [
-                phi.sin() * theta.cos(),
-                phi.cos(),
-                phi.sin() * theta.sin(),
-            ];
+            let dir = [phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()];
             if dir.iter().any(|d| d.abs() < 0.05) {
                 continue; // skip near-axis directions (tie-prone)
             }
@@ -183,7 +217,11 @@ mod tests {
             let want = brute(&mut world, origin, dir, REACH);
             match (got, want) {
                 (Some(g), Some(w)) => {
-                    assert_eq!((g.x, g.y, g.z), (w.0, w.1, w.2), "origin={origin:?} dir={dir:?}");
+                    assert_eq!(
+                        (g.x, g.y, g.z),
+                        (w.0, w.1, w.2),
+                        "origin={origin:?} dir={dir:?}"
+                    );
                     assert_eq!(cell_id(g.cell), cell_id(w.3));
                 }
                 (None, None) => {}
@@ -199,14 +237,18 @@ mod tests {
         let mut world = World::new(1, Preset::Flat, Vec::new());
         // eye 6.62 above surface plane y=5.0; floor cells y=4
         let origin = [8.5, 6.62, 8.5];
-        let hit = dda(origin, [0.0, -1.0, 0.0], REACH, |x, y, z| world.get_block(x, y, z));
+        let hit = dda(origin, [0.0, -1.0, 0.0], REACH, |x, y, z| {
+            world.get_block(x, y, z)
+        });
         assert!(hit.is_some());
         let h = hit.unwrap();
         assert_eq!(h.y, 4);
         assert_eq!(h.face, [0, 1, 0]);
         assert!((h.dist - 1.62).abs() < 1e-9, "dist={}", h.dist);
         // horizontal: nothing within reach on flat world
-        let miss = dda(origin, [1.0, 0.0, 0.0], REACH, |x, y, z| world.get_block(x, y, z));
+        let miss = dda(origin, [1.0, 0.0, 0.0], REACH, |x, y, z| {
+            world.get_block(x, y, z)
+        });
         assert!(miss.is_none());
     }
 }

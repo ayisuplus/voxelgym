@@ -28,14 +28,16 @@ impl World {
         let id = self.next_item_id;
         self.next_item_id += 1;
         // small deterministic scatter from the world rng stream
-        let vx = (self.rng.next_f64() - 0.5) * 0.1;
-        let vz = (self.rng.next_f64() - 0.5) * 0.1;
+        let step_ratio = self.clock_config().default_step_ratio();
+        let scale = self.physics.scale();
+        let vx = (self.rng.next_f64() - 0.5) * 0.1 * scale * step_ratio;
+        let vz = (self.rng.next_f64() - 0.5) * 0.1 * scale * step_ratio;
         self.items.push(ItemEntity {
             id,
             item,
             count,
             pos,
-            vel: [vx, 0.2, vz],
+            vel: [vx, 0.2 * scale, vz],
             age: 0,
         });
     }
@@ -45,14 +47,22 @@ impl World {
 /// satisfy the borrow checker (collision reads the world).
 pub fn tick_items_physics(world: &mut World) {
     let ih = ITEM_HALF * world.physics.scale;
+    let step_ratio = world.clock_config().default_step_ratio();
     let mut items = std::mem::take(&mut world.items);
     for it in items.iter_mut() {
         let mut min = [it.pos[0] - ih, it.pos[1] - ih, it.pos[2] - ih];
         let mut max = [it.pos[0] + ih, it.pos[1] + ih, it.pos[2] + ih];
         let vel = it.vel;
-        let dy = clip_axis(world, &mut min, &mut max, 1, vel[1]);
-        let grounded = vel[1] < 0.0 && dy != vel[1];
-        if dy != vel[1] {
+        let requested_dy = crate::physics::gravity_step(
+            vel[1],
+            world.physics.gravity,
+            world.physics.gravity_mult,
+            step_ratio,
+        )
+        .0;
+        let dy = clip_axis(world, &mut min, &mut max, 1, requested_dy);
+        let grounded = requested_dy < 0.0 && dy != requested_dy;
+        if dy != requested_dy {
             it.vel[1] = 0.0;
         }
         let dx = clip_axis(world, &mut min, &mut max, 0, vel[0]);
@@ -71,12 +81,19 @@ pub fn tick_items_physics(world: &mut World) {
         // ground friction (MC-style): drops settle within a few ticks
         // instead of sliding down slopes forever
         if grounded {
-            it.vel[0] *= 0.6;
-            it.vel[2] *= 0.6;
+            let friction = 0.6_f64.powf(step_ratio);
+            it.vel[0] *= friction;
+            it.vel[2] *= friction;
         }
         // gravity for next tick (move-then-accelerate order, same as agent;
         // uses the world physics so gravity ablation covers drops too)
-        it.vel[1] = (it.vel[1] - world.physics.gravity) * world.physics.gravity_mult;
+        it.vel[1] = crate::physics::gravity_step(
+            it.vel[1],
+            world.physics.gravity,
+            world.physics.gravity_mult,
+            step_ratio,
+        )
+        .1;
         if it.vel[1] < world.physics.terminal_vy {
             it.vel[1] = world.physics.terminal_vy;
         }
@@ -117,15 +134,19 @@ pub fn tick_items_logic(world: &mut World) {
     let agent_center = [apos[0], apos[1] + 0.9 * sc, apos[2]];
     let pickup_r2 = (PICKUP_RADIUS * sc) * (PICKUP_RADIUS * sc);
     let dead = world.agent.dead;
+    let pickup_delay = world
+        .clock_config()
+        .ticks_for_default_ticks(PICKUP_DELAY_TICKS as u64);
+    let despawn_age = world.clock_config().ticks_for_default_ticks(DESPAWN_TICKS);
     let mut kept = Vec::with_capacity(items.len());
     for mut it in items {
-        if it.age >= DESPAWN_TICKS {
+        if it.age >= despawn_age {
             continue;
         }
         let d2 = (it.pos[0] - agent_center[0]).powi(2)
             + (it.pos[1] - agent_center[1]).powi(2)
             + (it.pos[2] - agent_center[2]).powi(2);
-        if !dead && it.age >= PICKUP_DELAY_TICKS as u64 && d2 < pickup_r2 {
+        if !dead && it.age >= pickup_delay && d2 < pickup_r2 {
             let left = world.agent.inventory.add(it.item, it.count);
             let taken = it.count - left;
             if taken > 0 {
@@ -182,7 +203,13 @@ mod tests {
         }
         assert_eq!(w.agent.inventory.count(DIRT), 3);
         assert!(w.items.is_empty());
-        assert!(matches!(w.events.last(), Some(Event::ItemPicked { item: DIRT, count: 3 })));
+        assert!(matches!(
+            w.events.last(),
+            Some(Event::ItemPicked {
+                item: DIRT,
+                count: 3
+            })
+        ));
     }
 
     #[test]

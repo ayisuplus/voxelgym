@@ -34,9 +34,9 @@ pub struct LidarConfig {
     /// Elevation span, degrees; positive = up. Row 0 = min_elev.
     pub min_elev_deg: f64,
     pub max_elev_deg: f64,
-    /// Max range in cells; misses return range 0 / SKY_SEG / intensity 0.
+    /// Max physical range in meters; misses return range 0 / SKY_SEG / intensity 0.
     pub max_range: f64,
-    /// Gaussian range noise stddev in cells; 0.0 = exact.
+    /// Gaussian range noise stddev in meters; 0.0 = exact.
     pub noise_sigma: f64,
     /// Per-beam dropout probability in [0, 1): the beam returns nothing.
     pub dropout_p: f64,
@@ -45,7 +45,7 @@ pub struct LidarConfig {
 }
 
 impl Default for LidarConfig {
-    /// VLP-16-ish: 16 channels, ±15 deg, 512 azimuths, 64-cell range.
+    /// VLP-16-ish: 16 channels, ±15 deg, 512 azimuths, 64-meter range.
     fn default() -> Self {
         LidarConfig {
             channels: 16,
@@ -63,7 +63,7 @@ impl Default for LidarConfig {
 pub struct Scan {
     pub channels: usize,
     pub azimuth_steps: usize,
-    /// [C, A] row-major; 0.0 = no return.
+    /// [C, A] row-major meters; 0.0 = no return.
     pub range: Vec<f32>,
     /// [C, A] 0..=1.
     pub intensity: Vec<f32>,
@@ -85,7 +85,10 @@ fn beam_noise(cfg: &LidarConfig, frame_idx: u64, beam: usize) -> (f64, f64) {
     let h2 = hash_pos(cfg.noise_seed, beam as i32, frame_idx as i32, 0, 72);
     let u1 = ((h1 >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64); // (0,1]
     let u2 = (h2 >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
-    ((-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos(), u2)
+    (
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos(),
+        u2,
+    )
 }
 
 /// Full scan from `origin` (typically the agent eye, but any pose works —
@@ -98,8 +101,9 @@ pub fn scan(
     yaw_deg: f64,
     frame_idx: u64,
 ) -> Scan {
-    let grid = ChunkGrid::new(world, origin);
-    let max_range = cfg.max_range.min(grid.max_dist());
+    let grid = ChunkGrid::with_max_distance_meters(world, origin, cfg.max_range);
+    let scale = grid.scale();
+    let max_range_cells = grid.max_dist_cells();
 
     let (c_n, a_n) = (cfg.channels, cfg.azimuth_steps);
     let mut range = vec![0f32; c_n * a_n];
@@ -123,7 +127,8 @@ pub fn scan(
         .enumerate()
         .for_each(|(c, ((r_row, i_row), s_row))| {
             let elev = if c_n > 1 {
-                cfg.min_elev_deg + (cfg.max_elev_deg - cfg.min_elev_deg) * (c as f64 / (c_n - 1) as f64)
+                cfg.min_elev_deg
+                    + (cfg.max_elev_deg - cfg.min_elev_deg) * (c as f64 / (c_n - 1) as f64)
             } else {
                 cfg.min_elev_deg
             };
@@ -139,8 +144,8 @@ pub fn scan(
                 if cfg.dropout_p > 0.0 && u2 < cfg.dropout_p {
                     continue; // no return: zeros/SKY already in place
                 }
-                if let Some(h) = dda(origin, dir, max_range, |x, y, z| grid.get(x, y, z)) {
-                    let mut r = h.dist;
+                if let Some(h) = dda(origin, dir, max_range_cells, |x, y, z| grid.get(x, y, z)) {
+                    let mut r = h.dist / scale;
                     if cfg.noise_sigma > 0.0 {
                         r = (r + noise * cfg.noise_sigma).max(0.0);
                     }
@@ -148,12 +153,13 @@ pub fn scan(
                     s_row[a] = cell_id(h.cell);
                     // albedo x |cos incidence| / (1 + k r^2)
                     let col = block_def(cell_id(h.cell)).color;
-                    let albedo = (0.299 * col[0] as f64 + 0.587 * col[1] as f64 + 0.114 * col[2] as f64)
-                        / 255.0;
+                    let albedo =
+                        (0.299 * col[0] as f64 + 0.587 * col[1] as f64 + 0.114 * col[2] as f64)
+                            / 255.0;
                     let cos_i = (dir[0] * h.face[0] as f64
                         + dir[1] * h.face[1] as f64
                         + dir[2] * h.face[2] as f64)
-                    .abs();
+                        .abs();
                     i_row[a] = (albedo * cos_i / (1.0 + 0.02 * r * r)).clamp(0.0, 1.0) as f32;
                 }
             }
@@ -210,20 +216,24 @@ mod tests {
         let s = scan(&mut w, &cfg4x8(), origin, 270.0, 0);
         let a_n = 8;
         // azimuth 0 = +x straight at the wall: exact DDA range 4.5
-        let r0 = s.range[0 * a_n] as f64;
-        assert!((r0 - 4.5 / 5f64.to_radians().cos()).abs() < 1e-5, "row0 range {}", r0);
-        assert_eq!(s.seg[0], STONE as u16);
+        let r0 = s.range[0] as f64;
+        assert!(
+            (r0 - 4.5 / 5f64.to_radians().cos()).abs() < 1e-5,
+            "row0 range {}",
+            r0
+        );
+        assert_eq!(s.seg[0], STONE);
         let r1 = s.range[a_n] as f64;
         let el1: f64 = -5.0 + 45.0 / 3.0;
         let want = 4.5 / (el1.to_radians().cos());
         assert!((r1 - want).abs() < 1e-4, "row1 range {} want {}", r1, want);
-        assert_eq!(s.seg[a_n], STONE as u16);
+        assert_eq!(s.seg[a_n], STONE);
         // row 2 (25 deg) grazes the wall's top cell (6.5 + 4.5*tan25 =
         // 8.6 < 9.0); row 3 (40 deg) clears it -> sky
         let r2 = s.range[2 * a_n] as f64;
         let el2 = 25f64.to_radians();
         assert!((r2 - 4.5 / el2.cos()).abs() < 1e-4, "row2 range {}", r2);
-        assert_eq!(s.seg[2 * a_n], STONE as u16);
+        assert_eq!(s.seg[2 * a_n], STONE);
         assert_eq!(s.range[3 * a_n], 0.0, "row3 sky");
         assert_eq!(s.seg[3 * a_n], SKY_SEG);
         // intensity sane on a hit

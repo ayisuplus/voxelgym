@@ -10,7 +10,7 @@ use crate::world::World;
 
 pub const BLAST_R: i32 = 2;
 pub const FUSE_TICKS: u64 = 2;
-/// max(0, floor(14 - 2.3 * dist)) half-hearts, dist in cells
+/// max(0, floor(14 - 2.3 * dist)) half-hearts, dist in meters
 pub const DMG_A: f64 = 14.0;
 pub const DMG_B: f64 = 2.3;
 pub const KNOCKBACK: f64 = 0.8;
@@ -33,7 +33,8 @@ pub fn tick_tnt(world: &mut World) {
             }
             if primed {
                 world.tnt_cells.remove(&c);
-                world.pending_booms.push((c.0, c.1, c.2, world.tick + FUSE_TICKS));
+                let fuse = world.clock_config().ticks_for_default_ticks(FUSE_TICKS);
+                world.pending_booms.push((c.0, c.1, c.2, world.tick + fuse));
             }
         }
     }
@@ -85,7 +86,10 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
                     // chain: 2..4 tick fuse, position-hash derived
                     let extra = hash_pos(world.seed, x, y, z, tick) % 3;
                     world.tnt_cells.remove(&(x, y, z));
-                    world.pending_booms.push((x, y, z, tick + FUSE_TICKS + extra));
+                    let fuse = world
+                        .clock_config()
+                        .ticks_for_default_ticks(FUSE_TICKS + extra);
+                    world.pending_booms.push((x, y, z, tick + fuse));
                 }
                 world.set_block(x, y, z, AIR);
             }
@@ -93,8 +97,12 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
     }
     // agent damage + knockback
     let p = world.agent.pos;
-    let (ax, ay, az) = (p[0], p[1] + 0.9, p[2]);
-    let (dx, dy, dz) = (ax - (bx as f64 + 0.5), ay - (by as f64 + 0.5), az - (bz as f64 + 0.5));
+    let (ax, ay, az) = (p[0], p[1] + world.agent.height / 2.0, p[2]);
+    let (dx, dy, dz) = (
+        ax - (bx as f64 + 0.5),
+        ay - (by as f64 + 0.5),
+        az - (bz as f64 + 0.5),
+    );
     let dist = (dx * dx + dy * dy + dz * dz).sqrt();
     // damage formula is written in meters: convert cell distance back
     let dist_m = dist / s;
@@ -107,10 +115,16 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
                 world.agent.dead = true;
             }
         }
-        let k = KNOCKBACK * s * (1.0 - dist_m / 5.0);
-        world.agent.vel[0] += dx / dist * k;
-        world.agent.vel[1] += dy / dist * k + 0.25 * s * (1.0 - dist_m / 5.0);
-        world.agent.vel[2] += dz / dist * k;
+        let step_ratio = world.clock_config().default_step_ratio();
+        let intensity = 1.0 - dist_m / 5.0;
+        let horizontal_k = KNOCKBACK * s * step_ratio * intensity;
+        // Horizontal state stores displacement for the configured step;
+        // vertical state remains the canonical 20 Hz affine-recurrence value
+        // and is fractionally integrated by gravity_step.
+        let vertical_k = KNOCKBACK * s * intensity;
+        world.agent.vel[0] += dx / dist * horizontal_k;
+        world.agent.vel[1] += dy / dist * vertical_k + 0.25 * s * intensity;
+        world.agent.vel[2] += dz / dist * horizontal_k;
     }
 }
 
@@ -118,6 +132,7 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::clock::ClockConfig;
     use crate::tick::{step, Action};
     use crate::worldgen::Preset;
 
@@ -142,7 +157,11 @@ mod tests {
         assert_eq!(w.get_block(5, 6, 2), AIR, "dirt destroyed");
         assert_eq!(w.get_block(5, 7, 2), AIR);
         assert_eq!(w.get_block(0, 6, 2), STONE, "out-of-radius block survives");
-        assert_eq!(cell_id(w.get_block(2, 6, 2)), AIR, "lever is inside r=2 and is destroyed");
+        assert_eq!(
+            cell_id(w.get_block(2, 6, 2)),
+            AIR,
+            "lever is inside r=2 and is destroyed"
+        );
     }
 
     #[test]
@@ -174,5 +193,26 @@ mod tests {
             step(&mut w, &idle());
         }
         assert!(w.agent.hp < hp0, "blast damaged the agent");
+    }
+
+    #[test]
+    fn knockback_has_the_same_physical_impulse_at_twenty_and_forty_hz() {
+        let mut w20 = World::new_with_clock(3, Preset::Void, Vec::new(), ClockConfig::default());
+        let mut w40 = World::new_with_clock(
+            3,
+            Preset::Void,
+            Vec::new(),
+            ClockConfig::new(1, 40).unwrap(),
+        );
+        w20.agent.pos = [2.5, 5.0, 0.5];
+        w40.agent.pos = w20.agent.pos;
+
+        explode(&mut w20, 0, 5, 0);
+        explode(&mut w40, 0, 5, 0);
+
+        assert_eq!(w20.agent.hp, w40.agent.hp);
+        assert!((w20.agent.vel[0] / 0.05 - w40.agent.vel[0] / 0.025).abs() < 1e-12);
+        assert!((w20.agent.vel[2] / 0.05 - w40.agent.vel[2] / 0.025).abs() < 1e-12);
+        assert!((w20.agent.vel[1] - w40.agent.vel[1]).abs() < 1e-12);
     }
 }

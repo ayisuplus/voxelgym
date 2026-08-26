@@ -6,6 +6,7 @@
 
 use crate::entity;
 use crate::fluid;
+use crate::ClockConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Physics {
@@ -24,7 +25,7 @@ pub struct Physics {
     pub suffocate_damage: i32, // half-hearts per 20 ticks with head in solid
     /// Agent mass (dimensionless, MC-scale). Newtonian gravity is
     /// mass-independent; mass enters via acceleration = force / mass.
-    pub agent_mass: f64,       // 1.0
+    pub agent_mass: f64, // 1.0
     /// Max ground propulsion force (accel 0.1 at mass 1 — MC ground accel).
     pub ground_force: f64,
     /// Max air-control force (accel 0.02 at mass 1 — MC air accel).
@@ -35,7 +36,7 @@ pub struct Physics {
     /// raycast/item/loose/fire/tnt) are multiplied by it; temporal
     /// constants (tick periods, damage intervals) are not. Circuit power
     /// range is a 4-bit discrete semantic and is intentionally NOT scaled.
-    pub scale: f64,
+    pub(crate) scale: f64,
 }
 
 impl Default for Physics {
@@ -64,9 +65,22 @@ impl Default for Physics {
 
 impl Physics {
     pub const FIELDS: &[&str] = &[
-        "gravity", "gravity_mult", "terminal_vy", "jump_vy", "walk_speed", "sneak_mult",
-        "water_spread", "lava_spread", "water_period", "lava_period", "fall_safe",
-        "lava_damage", "suffocate_damage", "agent_mass", "ground_force", "air_force",
+        "gravity",
+        "gravity_mult",
+        "terminal_vy",
+        "jump_vy",
+        "walk_speed",
+        "sneak_mult",
+        "water_spread",
+        "lava_spread",
+        "water_period",
+        "lava_period",
+        "fall_safe",
+        "lava_damage",
+        "suffocate_damage",
+        "agent_mass",
+        "ground_force",
+        "air_force",
         "scale",
     ];
 
@@ -88,7 +102,9 @@ impl Physics {
             "agent_mass" => self.agent_mass = value.max(1e-6),
             "ground_force" => self.ground_force = value,
             "air_force" => self.air_force = value,
-            "scale" => self.scale = value.max(1e-6),
+            "scale" => {
+                return Err("physics field 'scale' is immutable after world construction".into())
+            }
             _ => return Err(format!("unknown physics field '{key}'")),
         }
         Ok(())
@@ -117,6 +133,14 @@ impl Physics {
         })
     }
 
+    /// Structural cell density in cells per meter.
+    ///
+    /// This value is assigned by [`crate::World`] construction and cannot
+    /// be changed through the runtime override surface.
+    pub const fn scale(&self) -> f64 {
+        self.scale
+    }
+
     /// Returns a copy with every SPATIAL field multiplied by `s` (called
     /// once at world construction; `scale` itself is set to `s`). Ratios
     /// (sneak_mult, gravity_mult) and time-based fields (periods, damage
@@ -137,6 +161,26 @@ impl Physics {
         self
     }
 
+    /// Convert legacy 20 Hz per-step values to an immutable world clock.
+    /// Physical velocities stay in cells/second and accelerations in
+    /// cells/second² even though the integrator stores displacement-per-step.
+    pub fn temporally_scaled(mut self, clock: ClockConfig) -> Self {
+        let ratio = clock.default_step_ratio();
+        if ratio != 1.0 {
+            let accel_ratio = ratio * ratio;
+            // Vertical motion uses the exact fractional affine transition in
+            // `damped_step`; keep its canonical 20 Hz recurrence parameters
+            // here. Horizontal velocity remains displacement-per-step and is
+            // therefore scaled with the step duration.
+            self.walk_speed *= ratio;
+            self.ground_force *= accel_ratio;
+            self.air_force *= accel_ratio;
+            self.water_period = clock.ticks_for_default_ticks(self.water_period);
+            self.lava_period = clock.ticks_for_default_ticks(self.lava_period);
+        }
+        self
+    }
+
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
         for k in Self::FIELDS {
             buf.extend_from_slice(&self.get(k).unwrap().to_bits().to_le_bytes());
@@ -147,10 +191,76 @@ impl Physics {
         let mut p = Physics::default();
         for k in Self::FIELDS {
             let v = f64::from_bits(r.u64()?);
-            p.set(k, v)?;
+            if !v.is_finite() {
+                return Err(format!("invalid physics field '{k}': value must be finite"));
+            }
+            match *k {
+                "water_spread" | "lava_spread" => {
+                    validate_snapshot_integer(k, v, 0.0, u16::MAX as f64)?;
+                }
+                "water_period" | "lava_period" => {
+                    validate_snapshot_integer(k, v, 1.0, u64::MAX as f64)?;
+                }
+                "lava_damage" | "suffocate_damage" => {
+                    validate_snapshot_integer(k, v, i32::MIN as f64, i32::MAX as f64)?;
+                }
+                "agent_mass" if v <= 0.0 => {
+                    return Err("invalid physics field 'agent_mass': value must be positive".into());
+                }
+                _ => {}
+            }
+            if *k == "scale" {
+                // Snapshot restoration is construction, not a runtime
+                // mutation. Keep this path private so callers cannot alter
+                // the world's structural scale through `Physics::set`.
+                p.scale = v;
+            } else {
+                p.set(k, v)?;
+            }
         }
         Ok(p)
     }
+}
+
+fn validate_snapshot_integer(key: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
+    if value.fract() != 0.0 || !(min..=max).contains(&value) {
+        return Err(format!(
+            "invalid physics field '{key}': expected an integer in {min}..={max}"
+        ));
+    }
+    Ok(())
+}
+
+/// Fractional power of the legacy affine velocity recurrence
+/// `v_next = drag * v + addend`, together with its integrated displacement.
+///
+/// At ratio 1 this returns the historical multiply-then-add recurrence.
+/// Composing fractional
+/// ratios that sum to an integer reproduces both the original boundary
+/// velocity and displacement in collision-free motion.
+pub(crate) fn damped_step(velocity: f64, drag: f64, addend: f64, ratio: f64) -> (f64, f64) {
+    if ratio == 1.0 {
+        return (velocity, drag * velocity + addend);
+    }
+    if (drag - 1.0).abs() <= f64::EPSILON {
+        let displacement = ratio.mul_add(velocity, addend * ratio * (ratio - 1.0) * 0.5);
+        return (displacement, addend.mul_add(ratio, velocity));
+    }
+    let multiplier = drag.powf(ratio);
+    let fixed_point = addend / (1.0 - drag);
+    let transient = velocity - fixed_point;
+    let displacement = ((1.0 - multiplier) / (1.0 - drag)).mul_add(transient, ratio * fixed_point);
+    let next_velocity = multiplier.mul_add(transient, fixed_point);
+    (displacement, next_velocity)
+}
+
+/// Exact fractional form of the simulator's historical
+/// `(velocity - gravity) * drag` recurrence.
+pub(crate) fn gravity_step(velocity: f64, gravity: f64, drag: f64, ratio: f64) -> (f64, f64) {
+    if ratio == 1.0 {
+        return (velocity, (velocity - gravity) * drag);
+    }
+    damped_step(velocity, drag, -drag * gravity, ratio)
 }
 
 #[cfg(test)]

@@ -26,7 +26,10 @@ pub fn after_entities(world: &mut World) {
     // 4.5. fire (after fluids so water-extinguish resolves same-tick)
     crate::fire::tick_fire(world, &dirty);
     // 5. circuits
-    crate::circuit::tick_circuits(world, &dirty);
+    let circuit_period = world.clock_config().ticks_for_default_ticks(1);
+    if world.tick.is_multiple_of(circuit_period) {
+        crate::circuit::tick_circuits(world, &dirty);
+    }
     // 5.5. TNT (primed by powered wire / fire / lava)
     crate::tnt::tick_tnt(world);
     // 6. item merge / pickup / despawn
@@ -42,7 +45,11 @@ pub fn block_broken(world: &mut World, x: i32, y: i32, z: i32, cell: u16, proper
     let drops_ok = def.tool.is_none() || proper_tool;
     if drops_ok {
         if let Some((item, n)) = def.drops {
-            world.spawn_item(item, n as u16, [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5]);
+            world.spawn_item(
+                item,
+                n as u16,
+                [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5],
+            );
         }
     }
     world.events.push(Event::BlockMined { id });
@@ -75,20 +82,14 @@ mod tests {
 
         block_broken(&mut world, 2, 3, 4, STONE, false);
         assert!(world.items.is_empty());
-        assert_eq!(
-            world.drain_events(),
-            vec![Event::BlockMined { id: STONE }]
-        );
+        assert_eq!(world.drain_events(), vec![Event::BlockMined { id: STONE }]);
 
         block_broken(&mut world, -2, 3, -4, STONE, true);
         assert_eq!(world.items.len(), 1);
         assert_eq!(world.items[0].item, COBBLESTONE);
         assert_eq!(world.items[0].count, 1);
         assert_eq!(world.items[0].pos, [-1.5, 3.5, -3.5]);
-        assert_eq!(
-            world.drain_events(),
-            vec![Event::BlockMined { id: STONE }]
-        );
+        assert_eq!(world.drain_events(), vec![Event::BlockMined { id: STONE }]);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::world::{MiningState, World};
 
 /// One action per tick. Field order matches the gymnasium action dict:
 /// (move, jump, sneak, yaw, pitch, mine, place, use, hotbar, craft).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Action {
     /// 0 idle, 1 forward, 2 back, 3 left, 4 right
     pub mv: u8,
@@ -62,13 +62,25 @@ impl Action {
     }
 }
 
-/// Current crosshair target (DDA from eye, reach 4.5). Targeting ignores
-/// fluids (`blocks_target`); the renderer uses the strict `dda` policy.
+/// Current crosshair target (DDA from eye, physical reach 4.5 meters).
+/// Targeting ignores fluids (`blocks_target`); the renderer uses the strict
+/// `dda` policy. The returned hit distance is normalized to meters.
 pub fn raycast_target(world: &mut World) -> Option<RayHit> {
     let eye = world.agent.eye();
     let look = world.agent.look();
-    let reach = REACH * world.physics.scale;
-    crate::raycast::dda_with(eye, look, reach, |x, y, z| world.get_block(x, y, z), crate::raycast::blocks_target)
+    let scale = world.scale();
+    let reach = REACH * scale;
+    crate::raycast::dda_with(
+        eye,
+        look,
+        reach,
+        |x, y, z| world.get_block(x, y, z),
+        crate::raycast::blocks_target,
+    )
+    .map(|mut hit| {
+        hit.dist /= scale;
+        hit
+    })
 }
 
 pub fn step(world: &mut World, action: &Action) {
@@ -126,20 +138,28 @@ fn apply_action(world: &mut World, action: &Action) {
                     let tool = item_tool(held.item);
                     let proper = match def.tool {
                         None => false,
-                        Some((cls, tier)) => {
-                            tool.map_or(false, |(c, t)| c == cls && t >= tier)
-                        }
+                        Some((cls, tier)) => tool.is_some_and(|(c, t)| c == cls && t >= tier),
                     };
                     let mult = if proper { 5.0 } else { 1.0 };
-                    let add = mult / def.hardness_ticks as f64;
-                    let same = world.mining.map_or(false, |m| m.target == (h.x, h.y, h.z));
+                    // Legacy hardness <=5 is an intentional one-default-tick
+                    // interaction, independent of tool.  Express that as a
+                    // physical duration before applying the configured clock
+                    // so 40 Hz takes two ticks (the same 0.05 seconds) rather
+                    // than silently turning it into a ten-tick mine.
+                    let duration_default_ticks = if def.hardness_ticks <= 5 {
+                        1.0
+                    } else {
+                        def.hardness_ticks as f64 / mult
+                    };
+                    let add = world.clock_config().default_step_ratio() / duration_default_ticks;
+                    let same = world.mining.is_some_and(|m| m.target == (h.x, h.y, h.z));
                     let mut progress = if same {
                         world.mining.unwrap().progress
                     } else {
                         0.0
                     };
                     progress += add;
-                    if def.hardness_ticks <= 5 || progress >= 1.0 {
+                    if progress >= 1.0 {
                         break_block(world, h.x, h.y, h.z, proper);
                         world.mining = None;
                     } else {
@@ -186,13 +206,18 @@ fn apply_action(world: &mut World, action: &Action) {
                         let cell = match held.item {
                             RTORCH => make_cell(RTORCH, 1),
                             REPEATER => {
-                                let d4 = ((world.agent.yaw / 90.0).round() as i32).rem_euclid(4) as u16;
+                                let d4 =
+                                    ((world.agent.yaw / 90.0).round() as i32).rem_euclid(4) as u16;
                                 make_cell(REPEATER, d4)
                             }
                             other => other,
                         };
                         world.set_block(tx, ty, tz, cell);
-                        world.place_cooldown = 4;
+                        world.place_cooldown = world
+                            .clock_config()
+                            .ticks_for_default_ticks(4)
+                            .min(u8::MAX as u64)
+                            as u8;
                     }
                 }
             }
@@ -334,8 +359,8 @@ mod tests {
         w.set_block(ax + 1, 6, az, DOOR);
         w.set_block(ax - 1, 6, az, LEVER);
         let a = Action {
-            yaw: 18, // +x
-            pitch: 4,  // level
+            yaw: 18,  // +x
+            pitch: 4, // level
             use_: true,
             ..Default::default()
         };

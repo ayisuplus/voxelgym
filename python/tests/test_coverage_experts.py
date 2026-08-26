@@ -481,7 +481,7 @@ def test_expert_factory_and_episode_orchestration(monkeypatch, tmp_path):
     class Env:
         def __init__(self, **kwargs):
             self.world = EpisodeWorld(); self.i = 0; self.closed = False
-        def reset(self, **kwargs): return None
+        def reset(self, **kwargs): return {}, {}
         def step(self, action):
             self.i += 1
             obs = {"rgb": np.zeros((1, 1, 3)), "depth": np.zeros((1, 1)), "seg": np.zeros((1, 1))}

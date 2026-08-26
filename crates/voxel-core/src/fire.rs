@@ -48,7 +48,8 @@ pub fn tick_fire(world: &mut World, dirty: &[(i32, i32, i32)]) {
             }
         }
     }
-    if world.tick % FIRE_PERIOD != 0 || world.active_fire.is_empty() {
+    let fire_period = world.clock_config().ticks_for_default_ticks(FIRE_PERIOD);
+    if !world.tick.is_multiple_of(fire_period) || world.active_fire.is_empty() {
         return;
     }
 
@@ -68,7 +69,7 @@ pub fn tick_fire(world: &mut World, dirty: &[(i32, i32, i32)]) {
     }
 
     let seed = world.seed;
-    let bucket = world.tick / FIRE_PERIOD;
+    let bucket = world.tick / fire_period;
     // spread radius: Manhattan ball of radius s — at scale 1 this is exactly
     // the 6 face neighbors (DIRS6, legacy semantics); at scale s a 1 m gap
     // is s cells, so "fire jumps a 1 m gap" holds at any cell size
@@ -121,7 +122,9 @@ pub fn tick_fire(world: &mut World, dirty: &[(i32, i32, i32)]) {
                     }
                     let n = (x + dx, y + dy, z + dz);
                     let nc = world.peek_block(n.0, n.1, n.2);
-                    if block_def(cell_id(nc)).flammable && chance(seed, n.0, n.1, n.2, bucket, SPREAD_P) {
+                    if block_def(cell_id(nc)).flammable
+                        && chance(seed, n.0, n.1, n.2, bucket, SPREAD_P)
+                    {
                         new_fires.push(n);
                     }
                 }
@@ -183,7 +186,10 @@ mod tests {
                 break;
             }
         }
-        assert!(consumed, "fire spread to a neighboring plank within 200 ticks");
+        assert!(
+            consumed,
+            "fire spread to a neighboring plank within 200 ticks"
+        );
     }
 
     #[test]

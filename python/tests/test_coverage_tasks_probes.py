@@ -162,7 +162,12 @@ def test_collapse_truth_commit_and_single_answer(monkeypatch):
     task.supported = 3
     clone = FakeWorld(default=ids.SAND)
     clone.blocks[(3, task.SLAB_Y, 0)] = ids.AIR
-    monkeypatch.setattr(probes, "_branch_sim", lambda world, mutate, ticks: (mutate(clone), clone)[1])
+    def collapse_branch(world, interventions, ticks):
+        for spec in interventions:
+            clone.set_block(*spec["at"], spec["cell"])
+        return clone
+
+    monkeypatch.setattr(probes, "_branch_sim", collapse_branch)
     assert task._truth(FakeWorld())
 
     world = FakeWorld(pos=(-8.5, 6.0, 0.5))
@@ -170,6 +175,8 @@ def test_collapse_truth_commit_and_single_answer(monkeypatch):
     assert task.collapses
     assert task.step_reward(world) == (0.0, False)
     world.pos = (-4.5, 6.0, -2.5)
+    for spec in task.interventions_before_step(world, {}):
+        world.set_block(*spec["at"], spec["cell"])
     assert task.step_reward(world) == (1.0, True)
     assert len(world.blocks) == 9
     assert task.step_reward(world) == (0.0, False)
@@ -183,7 +190,12 @@ def test_water_reset_validates_branch_solution_and_reward(monkeypatch):
     task = probes.WaterRouting()
     wet = FakeWorld()
     wet.blocks[task.TARGET] = ids.WATER
-    monkeypatch.setattr(probes, "_branch_sim", lambda world, mutate, ticks: (mutate(wet), wet)[1])
+    def water_branch(world, interventions, ticks):
+        for spec in interventions:
+            wet.set_block(*spec["at"], spec["cell"])
+        return wet
+
+    monkeypatch.setattr(probes, "_branch_sim", water_branch)
     world = FakeWorld()
     task.on_reset(world, np.random.default_rng(0))
     assert world.pos == (3.5, 5.0, 2.5)

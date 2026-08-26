@@ -20,6 +20,16 @@ import numpy as np
 from . import ids
 from .env import ACTION_KEYS, VoxelGymEnv, random_action
 from .tasks import make_task, task_names
+from .tasks.metric import (
+    agent_position_meters,
+    metric_crosshair,
+    metric_drops_of,
+    metric_find_blocks,
+    metric_furnace_state,
+    metric_get_block,
+    metric_set_block,
+    metric_surface_y,
+)
 
 
 def yaw_bucket_toward(dx: float, dz: float) -> int:
@@ -52,11 +62,11 @@ def act(**kw) -> dict:
 
 
 def cell_id_of(world, x: int, y: int, z: int) -> int:
-    return world.get_block(x, y, z) & 0xFFF
+    return metric_get_block(world, (x, y, z)) & 0xFFF
 
 
 def in_water(world) -> bool:
-    x, y, z = world.agent_pos()
+    x, y, z = agent_position_meters(world)
     return cell_id_of(world, math.floor(x), math.floor(y), math.floor(z)) == ids.WATER
 
 
@@ -84,7 +94,7 @@ class Navigator:
         return max(xs) - min(xs) < 0.3 and max(zs) - min(zs) < 0.3
 
     def toward(self, world, tx: float, tz: float, allow_descent: bool = False) -> dict:
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         if self.stalled(x, z):
             self._stall += 1
         else:
@@ -105,7 +115,7 @@ class Navigator:
             # cliff guard: refuse drops > 3.5 cells unless landing in water
             fx, fz = fwd_vec(yaw)
             ax, az = int(math.floor(x + fx * 1.6)), int(math.floor(z + fz * 1.6))
-            sy = world.surface_y(ax, az)
+            sy = metric_surface_y(world, ax, az)
             if 0 <= sy < y - 3.5:
                 if cell_id_of(world, ax, sy + 1, az) != ids.WATER:
                     self._detour, self._dir = 15, -self._dir
@@ -129,7 +139,7 @@ class T1Expert:
 
     def act(self, world) -> dict:
         t = self.task.target
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         d = math.hypot(x - t[0], z - t[2])
         tick = world.tick()
 
@@ -194,7 +204,7 @@ class PlaceOp:
     def act(self, world) -> dict:
         if self.placed is not None:
             return act()
-        found = world.find_blocks(self.item, 5)
+        found = metric_find_blocks(world, self.item, 5)
         if found:
             self.placed = found[0]
             self.sink(self.placed)
@@ -202,7 +212,7 @@ class PlaceOp:
         slot = world.swap_to_hotbar(self.item)
         if slot < 0:
             return act()  # item missing; guard shouldn't have allowed this
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         fy = int(math.floor(y))
         # wedged in a 1x1 pocket (every placement target is the agent's own
         # cell): widen it — mine a side cell, then placement works
@@ -307,10 +317,10 @@ class HarvestOp:
             if p is not None and cell_id_of(world, *p) == self.block:
                 return p
             return None
-        ts = world.find_blocks(self.block, self.radius)
+        ts = metric_find_blocks(world, self.block, self.radius)
         if not ts:
             return None
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         # underground (caves/tunnels): prefer cells at or below the current
         # level — ceiling ores across caverns are unreachable by tunneling
         if self._underground(world, x, y, z):
@@ -323,7 +333,7 @@ class HarvestOp:
     def _reachable(self, world, t) -> bool:
         """True if the cell center is within reach AND outside the ±60 deg
         pitch dead cone (blocks nearly straight below/above can't be aimed)."""
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         dy = (t[1] + 0.5) - (y + 1.62)
         horiz = math.hypot(t[0] + 0.5 - x, t[2] + 0.5 - z)
         d3 = math.hypot(horiz, dy)
@@ -334,7 +344,7 @@ class HarvestOp:
         # Hold buckets that keep ANY solid cell in the focus direction under
         # the crosshair — the focus itself or an occluder (mine through).
         # When that cell breaks, the crosshair target changes and we re-aim.
-        ch = world.crosshair()
+        ch = metric_crosshair(world)
         if self._hold is not None and ch is not None:
             hit, hid = tuple(ch[0]), ch[1]
             if self._hold_cell is None and hid not in (ids.WATER, ids.LAVA):
@@ -343,7 +353,7 @@ class HarvestOp:
                 return act(mine=1, yaw=self._hold[0], pitch=self._hold[1], hotbar=slot)
         # (re)calibrate around the exact aim
         if self._cal_focus != self.focus:
-            x, y, z = world.agent_pos()
+            x, y, z = agent_position_meters(world)
             eye = (x, y + 1.62, z)
             fx, fy, fz = self.focus
             yb0, pb0 = aim_at(eye, fx + 0.5, fy + 0.5, fz + 0.5)
@@ -372,7 +382,7 @@ class HarvestOp:
     def _sweep_cell(self, world, yaw: int, reach: float):
         """Nearest solid cell in a forward sweep sector (5x5 window starting
         `reach` ahead) — catches veins that drifted off the tunnel axis."""
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         fx, fz = fwd_vec(yaw)
         lx, lz = -fz, fx
         fy = math.floor(y)
@@ -393,7 +403,7 @@ class HarvestOp:
         # two cells ahead, one down: far enough to escape the +-60 deg pitch
         # dead cone (pitch ~53 deg); the ray may hit the nearer cell first,
         # which is fine — mining clears the staircase either way
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         fx, fz = fwd_vec(yaw)
         return (int(math.floor(x + 2 * fx)), int(math.floor(y)) - 1, int(math.floor(z + 2 * fz)))
 
@@ -492,7 +502,7 @@ class HarvestOp:
         within 16."""
         if world.tick() < self.no_drops_until:
             return None
-        drops = world.drops_of(self.drop)
+        drops = metric_drops_of(world, self.drop)
         cap = 256.0 if self.target is None else 16.0
         drops = [d for d in drops if (d[0] - x) ** 2 + (d[1] - y) ** 2 + (d[2] - z) ** 2 <= cap]
         if not drops:
@@ -681,7 +691,7 @@ class HarvestOp:
         slot = 0
         if self.tool is not None and world.count_item(self.tool) > 0:
             slot = max(world.swap_to_hotbar(self.tool), 0)
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         # (mining rays ignore fluids, so submersion needs no special path)
 
         # phase pipeline — first non-None action wins; the order is
@@ -740,10 +750,10 @@ class SmeltOp:
 
     def act(self, world) -> dict:
         f = self.furnace_fn()
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         if math.hypot(x - (f[0] + 0.5), z - (f[2] + 0.5)) > 2.2:
             return self.nav.toward(world, f[0] + 0.5, f[2] + 0.5)
-        remaining, out_ready, fuel_left = world.furnace_state(*f)
+        remaining, out_ready, fuel_left = metric_furnace_state(world, f)
         eye = (x, y + 1.62, z)
         yb, pb = aim_at(eye, f[0] + 0.5, f[1] + 0.5, f[2] + 0.5)
         if out_ready:
@@ -768,7 +778,7 @@ class GatherExpert:
             # side effect: remember WHERE the table is (carry_table's
             # at_fn reads this) — the op may be skipped by the guard, so
             # detection must live here, not in PlaceOp
-            found = w.find_blocks(ids.CRAFTING_TABLE, 4)
+            found = metric_find_blocks(w, ids.CRAFTING_TABLE, 4)
             if found:
                 self.table_pos = found[0]
                 return True
@@ -852,7 +862,7 @@ class WaterRoutingExpert:
 
     def act(self, world) -> dict:
         cells = [(x, 4, 0) for x in range(1, 7)] + [(1, 7, 0)]  # rim last
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         if self.focus is not None:
             if cell_id_of(world, *self.focus) == ids.AIR:
                 self.focus = None
@@ -892,7 +902,7 @@ class BridgeOverLavaExpert:
         self.nav = Navigator()
 
     def act(self, world) -> dict:
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         pad = self.task.PAD
         if x > 16.2 or world.count_item(ids.PLANKS) == 0:
             return self.nav.toward(world, pad[0], pad[2])
@@ -925,7 +935,7 @@ class BuriedEscapeExpert:
         self.yaw = 18  # +x toward the pad side
 
     def act(self, world) -> dict:
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         pad = self.task.PAD
         eye = (x, y + 1.62, z)
 
@@ -965,9 +975,9 @@ class CircuitDoorExpert:
         self.target = task.target
 
     def act(self, world) -> dict:
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         for (lx, ly, lz) in self.levers:
-            if cell_id_of(world, lx, ly, lz) == ids.LEVER and (world.get_block(lx, ly, lz) >> 12) & 1 == 0:
+            if cell_id_of(world, lx, ly, lz) == ids.LEVER and (metric_get_block(world, (lx, ly, lz)) >> 12) & 1 == 0:
                 # lever still off: approach and flip
                 if math.hypot(x - (lx + 0.5), z - (lz + 0.5)) > 2.0:
                     return self.nav.toward(world, lx + 0.5, lz + 0.5)
@@ -1009,9 +1019,9 @@ class TntClearExpert:
         self.lever = (7, 6, 0)
 
     def act(self, world) -> dict:
-        x, y, z = world.agent_pos()
+        x, y, z = agent_position_meters(world)
         lx, ly, lz = self.lever
-        if cell_id_of(world, lx, ly, lz) == ids.LEVER and (world.get_block(lx, ly, lz) >> 12) & 1 == 0:
+        if cell_id_of(world, lx, ly, lz) == ids.LEVER and (metric_get_block(world, (lx, ly, lz)) >> 12) & 1 == 0:
             if math.hypot(x - (lx + 0.5), z - (lz + 0.5)) > 2.0:
                 return self.nav.toward(world, lx + 0.5, lz + 0.5)
             yb, pb = aim_at((x, y + 1.62, z), lx + 0.5, ly + 0.5, lz + 0.5)
@@ -1048,19 +1058,19 @@ class LogicProbeExpert:
             for b in (0, 1):
                 scratch = rs.PyWorld(0, "void")
                 scratch.restore(world.snapshot())
-                scratch.set_block(*self.task.LEVER_A, ids.LEVER | (a << 12))
-                scratch.set_block(*self.task.LEVER_B, ids.LEVER | (b << 12))
+                metric_set_block(scratch, self.task.LEVER_A, ids.LEVER | (a << 12))
+                metric_set_block(scratch, self.task.LEVER_B, ids.LEVER | (b << 12))
                 for _ in range(8):
                     scratch.step((0, 0, 0, 0, 4, 0, 0, 0, 0, 0))
-                out[(a, b)] = (scratch.get_block(*self.task.lamp) >> 12) & 1
+                out[(a, b)] = (metric_get_block(scratch, self.task.lamp) >> 12) & 1
         return out
 
     def act(self, world) -> dict:
         if self.plan is None:
             table = self._truth_table(world)
             cur = {
-                self.task.LEVER_A: (world.get_block(*self.task.LEVER_A) >> 12) & 1,
-                self.task.LEVER_B: (world.get_block(*self.task.LEVER_B) >> 12) & 1,
+                self.task.LEVER_A: (metric_get_block(world, self.task.LEVER_A) >> 12) & 1,
+                self.task.LEVER_B: (metric_get_block(world, self.task.LEVER_B) >> 12) & 1,
             }
             good = [c for c, v in table.items() if v == self.task.goal]
             assert good, f"template {self.task.template} cannot reach goal {self.task.goal}"
@@ -1073,14 +1083,14 @@ class LogicProbeExpert:
         if self.cool > 0:
             self.cool -= 1
             return act()
-        if world.tick() >= 8 and (world.get_block(*self.task.lamp) >> 12) & 1 == self.task.goal:
+        if world.tick() >= 8 and (metric_get_block(world, self.task.lamp) >> 12) & 1 == self.task.goal:
             return act()  # satisfied; the reward fires
         for cell, target in self.plan:
             lx, ly, lz = cell
-            cur = (world.get_block(lx, ly, lz) >> 12) & 1
+            cur = (metric_get_block(world, (lx, ly, lz)) >> 12) & 1
             if cur == target:
                 continue
-            x, y, z = world.agent_pos()
+            x, y, z = agent_position_meters(world)
             if math.hypot(x - (lx + 0.5), z - (lz + 0.5)) > 2.0:
                 return self.nav.toward(world, lx + 0.5, lz + 0.5)
             yb, pb = aim_at((x, y + 1.62, z), lx + 0.5, ly + 0.5, lz + 0.5)
@@ -1113,30 +1123,95 @@ def make_expert(task_name: str, task, seed: int = 0):
     return GatherExpert(task_name, seed=seed)
 
 
-def run_episode(task_name: str, seed: int, record_dir: str | None = None, render=False, epsilon: float = 0.0,
-                scale: float = 1.0):
-    from .recorder import Recorder
+def run_episode(
+    task_name: str,
+    seed: int,
+    record_dir: str | None = None,
+    render=False,
+    epsilon: float = 0.0,
+    scale: float = 1.0,
+    record_format: int = 1,
+    trace_level: str = "full",
+    dt_numerator: int = 1,
+    dt_denominator: int = 20,
+):
+    from .recorder import CausalRecorder, Recorder
+
+    if record_format not in (1, 2):
+        raise ValueError("record_format must be 1 or 2")
 
     task = make_task(task_name)
-    env = VoxelGymEnv(task=task, seed=seed, render=render, scale=scale)
-    env.reset(seed=seed)
+    env = VoxelGymEnv(
+        task=task,
+        seed=seed,
+        render=render,
+        scale=scale,
+        dt_numerator=dt_numerator,
+        dt_denominator=dt_denominator,
+        spacetime=record_format == 2,
+    )
+    initial_observation, _ = env.reset(seed=seed)
     expert = make_expert(task_name, task, seed=seed)
-    rec = Recorder(record_dir, task_name, seed, render=bool(render)) if record_dir else None
+    if not record_dir:
+        rec = None
+    elif record_format == 1:
+        rec = Recorder(record_dir, task_name, seed, render=bool(render))
+    else:
+        rec = CausalRecorder(
+            record_dir,
+            task_name,
+            seed,
+            trace_level=trace_level,
+            scale=scale,
+            dt_numerator=dt_numerator,
+            dt_denominator=dt_denominator,
+            render_every=(1 if render is True else int(render) if render else 0),
+            lidar=None,
+            spacetime=True,
+        )
+        rec.start(env, initial_observation)
     rng = np.random.default_rng(seed + 999_983)
     success = False
     steps = 0
     while True:
+        # Scripted experts historically moved inventory directly while
+        # choosing an action.  For a causal v2 recording, capture the true
+        # branch boundary so that any such move can be replayed as an explicit
+        # serialized intervention inside the transition.
+        decision_snapshot = env.snapshot() if isinstance(rec, CausalRecorder) else None
         a = expert.act(env.world)
         swap = env.world.take_swap()  # inventory-management event from act()
+        interventions = ()
+        if decision_snapshot is not None and swap:
+            env.restore(decision_snapshot)
+            interventions = ({"kind": "swap_to_hotbar", "item": int(swap)},)
         if epsilon > 0.0 and rng.random() < epsilon:
             # uniform random action (dataset diversity for world models);
             # place/craft stay 0 so random walk can't churn the inventory
             a = random_action(rng, zero=("place", "craft"))
-        obs, r, term, trunc, _ = env.step(a)
+        if record_format == 2 and rec is not None:
+            obs, r, term, trunc, info = env.step_traced(
+                a,
+                trace_level=trace_level,
+                interventions=interventions,
+            )
+        else:
+            obs, r, term, trunc, info = env.step(a)
         frames = None
         if render:
             frames = (obs["rgb"], obs["depth"], obs["seg"])
-        if rec:
+        if isinstance(rec, CausalRecorder):
+            rec.log(
+                env,
+                tuple(int(a[k]) for k in ACTION_KEYS),
+                r,
+                term,
+                trunc,
+                info,
+                obs,
+                swap=swap,
+            )
+        elif rec:
             rec.log(env.world, tuple(int(a[k]) for k in ACTION_KEYS), r, term or trunc, frames, swap=swap)
         steps += 1
         if term or trunc:
@@ -1154,12 +1229,20 @@ def main(argv=None) -> int:
     ap.add_argument("--episodes", type=int, default=20)
     ap.add_argument("--seed0", type=int, default=0)
     ap.add_argument("--record", type=str, default=None)
+    ap.add_argument("--format", type=int, choices=(1, 2), default=2)
+    ap.add_argument("--trace-level", choices=("off", "events", "full"), default="full")
     args = ap.parse_args(argv)
 
     wins = 0
     for i in range(args.episodes):
         seed = args.seed0 + i
-        ok, steps, h, _ = run_episode(args.task, seed, record_dir=args.record)
+        ok, steps, h, _ = run_episode(
+            args.task,
+            seed,
+            record_dir=args.record,
+            record_format=args.format,
+            trace_level=args.trace_level,
+        )
         wins += ok
         print(f"  ep {i} seed={seed}: {'OK' if ok else 'fail'} in {steps} ticks hash={h:016x}", flush=True)
     rate = wins / args.episodes

@@ -17,19 +17,27 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from .env import ACTION_KEYS
+from .episode_bundle import EpisodeBundleReader
 
 FRAME = 128
 
 
 def export(task: str, episodes: int, out_dir: str, render: int = 1, seed0: int = 0, epsilon: float = 0.0,
-           scale: float = 1.0):
+           scale: float = 1.0, format_version: int = 1):
     from .experts import run_episode
 
     os.makedirs(out_dir, exist_ok=True)
     wins = 0
     for i in range(episodes):
-        ok, steps, h, path = run_episode(task, seed0 + i, record_dir=out_dir, render=bool(render),
-                                         epsilon=epsilon, scale=scale)
+        kwargs = {
+            "record_dir": out_dir,
+            "render": bool(render),
+            "epsilon": epsilon,
+            "scale": scale,
+        }
+        if format_version != 1:
+            kwargs["record_format"] = format_version
+        ok, steps, h, path = run_episode(task, seed0 + i, **kwargs)
         wins += ok
         print(f"  ep {i}: {'OK' if ok else 'fail'} {steps} ticks -> {os.path.basename(path or '')}", flush=True)
     print(f"exported {episodes} episodes of {task} to {out_dir} (expert success {wins}/{episodes}, scale={scale})")
@@ -50,8 +58,10 @@ class VoxelSequenceDataset:
     def __init__(self, data_dir: str, seq_len: int = 16, split: str = "train", test_frac: float = 0.1):
         import torch  # noqa: F401  (torch Dataset protocol without hard dep at import)
         from torch.utils.data import Dataset  # noqa: F401
-        shards = sorted(glob.glob(os.path.join(data_dir, "*.parquet")))
-        assert shards, f"no parquet shards in {data_dir}"
+        legacy = glob.glob(os.path.join(data_dir, "*.parquet"))
+        bundles = glob.glob(os.path.join(data_dir, "*.vxbundle"))
+        shards = sorted(legacy + bundles)
+        assert shards, f"no parquet shards or Episode Bundles in {data_dir}"
         n_test = max(1, int(round(len(shards) * test_frac)))
         if split == "test":
             self.shards = shards[:n_test]
@@ -60,7 +70,11 @@ class VoxelSequenceDataset:
         self.seq_len = seq_len
         self._lengths: list[int] = []
         for s in self.shards:
-            n = pq.read_metadata(s).num_rows
+            n = (
+                EpisodeBundleReader(s).transitions.num_rows
+                if os.path.isdir(s)
+                else pq.read_metadata(s).num_rows
+            )
             self._lengths.append(max(0, n - seq_len + 1))
         self._cum = np.cumsum([0] + self._lengths)
         self._cache_idx = -1
@@ -72,7 +86,12 @@ class VoxelSequenceDataset:
     def _load(self, shard_idx: int):
         if self._cache_idx == shard_idx:
             return self._cache
-        table = pq.read_table(self.shards[shard_idx])
+        path = self.shards[shard_idx]
+        table = (
+            EpisodeBundleReader(path).transitions
+            if os.path.isdir(path)
+            else pq.read_table(path)
+        )
         rows = table.to_pylist()
         rgb = _decode_frames(rows, "rgb", (FRAME, FRAME, 3), np.uint8)
         if rgb is None:
@@ -120,6 +139,7 @@ def main(argv=None) -> int:
     e.add_argument("--epsilon", type=float, default=0.0, help="uniform-random action mixture")
     e.add_argument("--scale", type=float, default=1.0, help="cells per meter (2.0 = 0.5 m cells)")
     e.add_argument("--out", required=True)
+    e.add_argument("--format", type=int, choices=(1, 2), default=2)
     b = sub.add_parser("baseline")
     b.add_argument("--data", required=True)
     b.add_argument("--steps", type=int, default=50_000)
@@ -132,7 +152,7 @@ def main(argv=None) -> int:
 
     if args.cmd == "export":
         export(args.task, args.episodes, args.out, render=args.render, seed0=args.seed0,
-               epsilon=args.epsilon, scale=args.scale)
+               epsilon=args.epsilon, scale=args.scale, format_version=args.format)
         return 0
     if args.cmd == "baseline":
         ratio = baseline(args.data, steps=args.steps, batch=args.batch, seq_len=args.seq_len,

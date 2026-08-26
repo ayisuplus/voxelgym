@@ -40,7 +40,7 @@ pub fn schedule_support_checks(world: &mut World, dirty: &[(i32, i32, i32)]) {
             if !block_def(cell_id(below)).replaceable {
                 continue;
             }
-            let due = world.tick + 1;
+            let due = world.tick + world.clock_config().ticks_for_default_ticks(1);
             // O(1) dedup via the side set (a collapse avalanche schedules
             // thousands of cells per tick; a linear scan here is O(n^2))
             if world.scheduled_set.insert((cx, cy, cz)) {
@@ -86,25 +86,21 @@ pub fn convert_due_falls(world: &mut World) {
 
 /// Phase 2c: falling-block physics + landing conversion.
 pub fn tick_falling(world: &mut World) {
+    let step_ratio = world.clock_config().default_step_ratio();
     let mut falling = std::mem::take(&mut world.falling);
     let mut landed: Vec<(u64, u16, i32, i32, i32)> = Vec::new();
     for fb in falling.iter_mut() {
         let sc = world.physics.scale;
         let (fh, fht) = (FALL_HALF * sc, FALL_HEIGHT * sc);
-        let mut min = [
-            fb.pos[0] - fh,
-            fb.pos[1] - fht / 2.0,
-            fb.pos[2] - fh,
-        ];
-        let mut max = [
-            fb.pos[0] + fh,
-            fb.pos[1] + fht / 2.0,
-            fb.pos[2] + fh,
-        ];
+        let mut min = [fb.pos[0] - fh, fb.pos[1] - fht / 2.0, fb.pos[2] - fh];
+        let mut max = [fb.pos[0] + fh, fb.pos[1] + fht / 2.0, fb.pos[2] + fh];
         let vel = fb.vel;
-        let dy = clip_axis(world, &mut min, &mut max, 1, vel[1]);
-        let clipped_down = vel[1] < 0.0 && dy != vel[1];
-        if vel[1] < 0.0 {
+        let requested_dy =
+            crate::physics::gravity_step(vel[1], FALL_GRAVITY * sc, FALL_GRAVITY_MULT, step_ratio)
+                .0;
+        let dy = clip_axis(world, &mut min, &mut max, 1, requested_dy);
+        let clipped_down = requested_dy < 0.0 && dy != requested_dy;
+        if requested_dy < 0.0 {
             fb.fall_dist += -dy;
         }
         let dx = clip_axis(world, &mut min, &mut max, 0, vel[0]);
@@ -122,16 +118,19 @@ pub fn tick_falling(world: &mut World) {
         ];
         if clipped_down {
             // impact damage: block AABB vs agent AABB at the landing point
-            if fb.fall_dist >= 2.0 {
-                let aabb_overlap = min[0] < world.agent.pos[0] + 0.3
-                    && max[0] > world.agent.pos[0] - 0.3
-                    && min[1] < world.agent.pos[1] + 1.8
-                    && max[1] > world.agent.pos[1]
-                    && min[2] < world.agent.pos[2] + 0.3
-                    && max[2] > world.agent.pos[2] - 0.3;
+            let fall_dist_m = fb.fall_dist / sc;
+            if fall_dist_m >= 2.0 {
+                let agent_min = world.agent.aabb_min();
+                let agent_max = world.agent.aabb_max();
+                let aabb_overlap = min[0] < agent_max[0]
+                    && max[0] > agent_min[0]
+                    && min[1] < agent_max[1]
+                    && max[1] > agent_min[1]
+                    && min[2] < agent_max[2]
+                    && max[2] > agent_min[2];
                 if aabb_overlap {
-                    // custom: floor(fall_dist) half-hearts
-                    let dmg = fb.fall_dist.floor() as i32;
+                    // custom: floor(fall distance in meters) half-hearts
+                    let dmg = fall_dist_m.floor() as i32;
                     world.agent.hp -= dmg;
                     if world.agent.hp <= 0 {
                         world.agent.hp = 0;
@@ -149,7 +148,13 @@ pub fn tick_falling(world: &mut World) {
         } else {
             // gravity for next tick (loose-block constant, not entity 0.08;
             // spatial -> scales with the world)
-            fb.vel[1] = (fb.vel[1] - FALL_GRAVITY * sc) * FALL_GRAVITY_MULT;
+            fb.vel[1] = crate::physics::gravity_step(
+                fb.vel[1],
+                FALL_GRAVITY * sc,
+                FALL_GRAVITY_MULT,
+                step_ratio,
+            )
+            .1;
             let term = -3.92 * sc;
             if fb.vel[1] < term {
                 fb.vel[1] = term;
@@ -171,13 +176,25 @@ fn land(world: &mut World, block: u16, x: i32, y: i32, z: i32) {
     } else if !def.solid {
         // torch/wire/lever/door etc: becomes an item drop
         if let Some((item, n)) = block_def(block).drops {
-            world.spawn_item(item, n as u16, [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5]);
+            world.spawn_item(
+                item,
+                n as u16,
+                [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5],
+            );
         }
     } else {
         // should not happen (clip stopped at the first non-solid), but be
         // conservative: drop as item rather than overwrite a solid block
         if let Some((item, n)) = block_def(block).drops {
-            world.spawn_item(item, n as u16, [x as f64 + 0.5, y as f64 + 1.5, z as f64 + 0.5]);
+            world.spawn_item(
+                item,
+                n as u16,
+                [
+                    x as f64 + 0.5,
+                    y as f64 + 0.5 + world.scale(),
+                    z as f64 + 0.5,
+                ],
+            );
         }
     }
 }
@@ -198,10 +215,14 @@ mod tests {
         let mut w = void_world();
         w.set_block(5, 5, 5, STONE); // platform
         w.set_block(5, 10, 5, SAND); // floating sand — unsupported
-        // manually trigger neighbor change: set_block already marks dirty
+                                     // manually trigger neighbor change: set_block already marks dirty
         let idle = Action::default();
         step(&mut w, &idle); // schedule (due tick 1... world.tick increments)
-        assert_eq!(w.get_block(5, 10, 5), SAND, "still a block on the scheduling tick");
+        assert_eq!(
+            w.get_block(5, 10, 5),
+            SAND,
+            "still a block on the scheduling tick"
+        );
         step(&mut w, &idle); // conversion happens
         assert_eq!(w.get_block(5, 10, 5), AIR);
         assert_eq!(w.falling.len(), 1);
@@ -254,6 +275,10 @@ mod tests {
         for _ in 0..30 {
             step(&mut w, &idle);
         }
-        assert_eq!(w.get_block(5, 6, 5), SAND, "upper sand landed where support was");
+        assert_eq!(
+            w.get_block(5, 6, 5),
+            SAND,
+            "upper sand landed where support was"
+        );
     }
 }

@@ -7,7 +7,12 @@ import math
 import numpy as np
 
 from .. import ids
-from .base import Task
+from .base import RewardOutcome, Task, evidence_event_ids
+from .metric import (
+    agent_position_meters,
+    metric_set_block,
+    metric_surface_y,
+)
 
 # Achievement ladder: (milestone name -> item id counted in inventory).
 LADDER: list[tuple[str, int]] = [
@@ -52,7 +57,7 @@ class NavigateToTarget(Task):
         h: dict[tuple[int, int], int] = {}
         for cx in range(x0 - r, x0 + r + 1):
             for cz in range(z0 - r, z0 + r + 1):
-                sy = world.surface_y(cx, cz)
+                sy = metric_surface_y(world, cx, cz)
                 if sy < 0:
                     sy = 0
                 if sy < 62:  # water body above: swim at sea level
@@ -74,8 +79,9 @@ class NavigateToTarget(Task):
         return seen
 
     def on_reset(self, world, rng: np.random.Generator):
-        x0, y0, z0 = world.agent_pos()
-        reach = self._reachable_columns(world, int(x0), int(z0))
+        x0, y0, z0 = agent_position_meters(world)
+        spawn_column = (math.floor(x0), math.floor(z0))
+        reach = self._reachable_columns(world, *spawn_column)
         tx = tz = None
         for _ in range(20):
             angle = float(rng.uniform(0, 2 * math.pi))
@@ -87,28 +93,41 @@ class NavigateToTarget(Task):
                 break
         if tx is None:
             # fallback: any reachable column, distance as close to 25 as possible
-            cands = [c for c in reach if c != (int(x0), int(z0))]
+            cands = [c for c in reach if c != spawn_column]
             cands.sort(key=lambda c: abs(math.hypot(c[0] - x0, c[1] - z0) - 25.0))
             tx, tz = cands[0]
-        sy = world.surface_y(tx, tz)
+        sy = metric_surface_y(world, tx, tz)
         if sy < 0:
-            sy = int(y0)
+            sy = math.floor(y0)
         for i in range(1, 6):
-            world.set_block(tx, sy + i, tz, ids.TORCH)
+            metric_set_block(world, (tx, sy + i, tz), ids.TORCH)
         self.target = (tx + 0.5, float(sy + 1), tz + 0.5)
         self._prev = self._dist(world)
 
     def _dist(self, world) -> float:
-        x, _, z = world.agent_pos()
+        x, _, z = agent_position_meters(world)
         return math.hypot(x - self.target[0], z - self.target[2])
 
-    def step_reward(self, world) -> tuple[float, bool]:
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
         d = self._dist(world)
-        reward = self._prev - d
-        self._prev = d
+        progress = self._prev - d
         if d <= 2.0:
-            return reward + 1.0, True
-        return reward, False
+            return RewardOutcome(
+                total=progress + 1.0,
+                components={"progress": progress, "success": 1.0},
+                terminated=True,
+                termination_reason="target_reached",
+                evidence_event_ids=evidence_event_ids(
+                    events, kinds=("agent_moved",)
+                ),
+                evidence_labels=("task:navigate_to_target:target_reached",),
+                task_state_updates={"_prev": d},
+            )
+        return RewardOutcome(
+            total=progress,
+            components={"progress": progress},
+            task_state_updates={"_prev": d},
+        )
 
 
 class AchievementTask(Task):
@@ -129,15 +148,55 @@ class AchievementTask(Task):
     def on_reset(self, world, rng: np.random.Generator):
         self._shaped = set()
 
-    def step_reward(self, world) -> tuple[float, bool]:
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
         reward = 0.0
+        evidence: list[str] = []
+        shaped = set(self._shaped)
         for name, item in LADDER[: self._goal_idx]:
-            if name not in self._shaped and world.count_item(item) >= 1:
-                self._shaped.add(name)
+            if name not in shaped and world.count_item(item) >= 1:
+                shaped.add(name)
                 reward += 0.1
+                evidence.append(f"task:{self.name}:milestone:{name}")
+        updates = {"_shaped": sorted(shaped)} if shaped != self._shaped else {}
         if world.count_item(self._goal_item) >= 1:
-            return reward + 1.0, True
-        return reward, False
+            evidence.append(f"task:{self.name}:goal_achieved")
+            components = {"success": 1.0}
+            if reward:
+                components["milestones"] = reward
+            return RewardOutcome(
+                total=reward + 1.0,
+                components=components,
+                terminated=True,
+                termination_reason="goal_achieved",
+                evidence_event_ids=evidence_event_ids(
+                    events,
+                    kinds=(
+                        "inventory_changed",
+                        "item_picked",
+                        "crafted",
+                        "smelted",
+                        "block_mined",
+                    ),
+                ),
+                evidence_labels=tuple(evidence),
+                task_state_updates=updates,
+            )
+        return RewardOutcome(
+            total=reward,
+            components={"milestones": reward} if reward else {},
+            evidence_event_ids=evidence_event_ids(
+                events,
+                kinds=(
+                    "inventory_changed",
+                    "item_picked",
+                    "crafted",
+                    "smelted",
+                    "block_mined",
+                ),
+            ),
+            evidence_labels=tuple(evidence),
+            task_state_updates=updates,
+        )
 
 
 def make_task(name: str) -> Task:

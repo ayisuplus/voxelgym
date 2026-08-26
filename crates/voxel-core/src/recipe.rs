@@ -12,11 +12,7 @@ use crate::world::{Event, World};
 
 pub const SMELT_TICKS: u32 = 200;
 /// Fuel heat values: items smelted per unit.
-pub const FUELS: &[(u16, u8)] = &[
-    (ITEM_COAL, 8),
-    (PLANKS, 1),
-    (LOG, 1),
-];
+pub const FUELS: &[(u16, u8)] = &[(ITEM_COAL, 8), (PLANKS, 1), (LOG, 1)];
 pub const TABLE_RANGE: i32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,8 +56,9 @@ fn parse_recipes() -> Vec<Recipe> {
         match r.kind.as_str() {
             "shapeless" => {
                 for (name, n) in &r.inputs {
-                    let id = item_id_by_name(name)
-                        .unwrap_or_else(|| panic!("recipes.toml recipe '{}': unknown item '{name}'", r.name));
+                    let id = item_id_by_name(name).unwrap_or_else(|| {
+                        panic!("recipes.toml recipe '{}': unknown item '{name}'", r.name)
+                    });
                     inputs.push((id, *n));
                 }
             }
@@ -72,24 +69,31 @@ fn parse_recipes() -> Vec<Recipe> {
                         if ch == ' ' {
                             continue;
                         }
-                        let name = r
-                            .key
-                            .get(&ch.to_string())
-                            .unwrap_or_else(|| panic!("recipes.toml recipe '{}': pattern char '{ch}' not in key", r.name));
+                        let name = r.key.get(&ch.to_string()).unwrap_or_else(|| {
+                            panic!(
+                                "recipes.toml recipe '{}': pattern char '{ch}' not in key",
+                                r.name
+                            )
+                        });
                         *counts.entry(name.clone()).or_insert(0) += 1;
                     }
                 }
                 for (name, n) in counts {
-                    let id = item_id_by_name(&name)
-                        .unwrap_or_else(|| panic!("recipes.toml recipe '{}': unknown item '{name}'", r.name));
+                    let id = item_id_by_name(&name).unwrap_or_else(|| {
+                        panic!("recipes.toml recipe '{}': unknown item '{name}'", r.name)
+                    });
                     inputs.push((id, n));
                 }
             }
             other => panic!("recipes.toml recipe '{}': unknown kind '{other}'", r.name),
         }
         inputs.sort_unstable(); // canonical order for determinism of consume
-        let out_id = item_id_by_name(&r.out)
-            .unwrap_or_else(|| panic!("recipes.toml recipe '{}': unknown out item '{}'", r.name, r.out));
+        let out_id = item_id_by_name(&r.out).unwrap_or_else(|| {
+            panic!(
+                "recipes.toml recipe '{}': unknown out item '{}'",
+                r.name, r.out
+            )
+        });
         out.push(Recipe {
             id: r.id,
             name: r.name,
@@ -101,7 +105,10 @@ fn parse_recipes() -> Vec<Recipe> {
     }
     out.sort_by_key(|r| r.id);
     let max = out.last().map(|r| r.id).unwrap_or(0);
-    assert!(max < 8, "craft action space is Discrete(8): ids must be < 8");
+    assert!(
+        max < 8,
+        "craft action space is Discrete(8): ids must be < 8"
+    );
     out
 }
 
@@ -118,10 +125,15 @@ pub fn recipe_by_id(id: u8) -> Option<&'static Recipe> {
 /// True if a crafting_table block is within TABLE_RANGE (Chebyshev) of the agent.
 pub fn table_nearby(world: &mut World) -> bool {
     let p = world.agent.pos;
-    let (cx, cy, cz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
-    for x in cx - TABLE_RANGE..=cx + TABLE_RANGE {
-        for y in (cy - TABLE_RANGE).max(0)..=(cy + TABLE_RANGE).min(127) {
-            for z in cz - TABLE_RANGE..=cz + TABLE_RANGE {
+    let range = (TABLE_RANGE as f64 * world.scale()).round() as i32;
+    let (cx, cy, cz) = (
+        p[0].floor() as i32,
+        p[1].floor() as i32,
+        p[2].floor() as i32,
+    );
+    for x in cx - range..=cx + range {
+        for y in (cy - range).max(0)..=(cy + range).min(world.height() - 1) {
+            for z in cz - range..=cz + range {
                 if cell_id(world.get_block(x, y, z)) == CRAFTING_TABLE {
                     return true;
                 }
@@ -151,7 +163,7 @@ pub fn craft(world: &mut World, id: u8) -> bool {
     let left = world.agent.inventory.add(r.out, r.count);
     if left > 0 {
         let p = world.agent.pos;
-        world.spawn_item(r.out, left, [p[0], p[1] + 1.0, p[2]]);
+        world.spawn_item(r.out, left, [p[0], p[1] + world.scale(), p[2]]);
     }
     world.events.push(Event::Crafted {
         recipe: r.id,
@@ -180,10 +192,18 @@ pub fn use_furnace(world: &mut World, x: i32, y: i32, z: i32) {
         let left = world.agent.inventory.add(ITEM_IRON_INGOT, 1);
         if left > 0 {
             let p = world.agent.pos;
-            world.spawn_item(ITEM_IRON_INGOT, 1, [p[0], p[1] + 1.0, p[2]]);
+            world.spawn_item(ITEM_IRON_INGOT, 1, [p[0], p[1] + world.scale(), p[2]]);
         }
-        world.events.push(Event::Smelted { item: ITEM_IRON_INGOT });
-        world.furnaces.insert((x, y, z), FurnaceState { out_ready: false, ..st });
+        world.events.push(Event::Smelted {
+            item: ITEM_IRON_INGOT,
+        });
+        world.furnaces.insert(
+            (x, y, z),
+            FurnaceState {
+                out_ready: false,
+                ..st
+            },
+        );
         return;
     }
     if st.remaining > 0 {
@@ -212,7 +232,10 @@ pub fn use_furnace(world: &mut World, x: i32, y: i32, z: i32) {
     world.furnaces.insert(
         (x, y, z),
         FurnaceState {
-            remaining: SMELT_TICKS,
+            remaining: world
+                .clock_config()
+                .ticks_for_default_ticks(SMELT_TICKS as u64)
+                .min(u32::MAX as u64) as u32,
             out_ready: false,
             fuel_left,
         },

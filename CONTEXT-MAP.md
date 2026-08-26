@@ -7,7 +7,7 @@ This is the canonical entry point for durable domain context in this multi-compo
 | `crates/voxel-core` | Deterministic world state, physics, terrain, blocks, entities, fluids, fire, TNT, circuits, inventory, and recipes | [Voxel Core context](crates/voxel-core/CONTEXT.md), `crates/voxel-core/src/lib.rs`, modules under `crates/voxel-core/src/` |
 | `crates/voxel-view` | CPU DDA rendering and LiDAR truth sensors | `crates/voxel-view/src/lib.rs`, `crates/voxel-view/src/lidar.rs` |
 | `crates/voxel-py` | PyO3 boundary between the Rust engine and Python | `crates/voxel-py/src/lib.rs` |
-| `python/voxelgym` | Gymnasium environment, tasks, experts, datasets, recording/replay, vector environments, and VQA tooling | `python/voxelgym/__init__.py`, package modules, `python/tests/` |
+| `python/voxelgym` | Gymnasium environment, tasks, experts, datasets, recording/replay, vector environments, and VQA tooling | [VoxelGym Python context](python/voxelgym/CONTEXT.md), `python/voxelgym/__init__.py`, package modules, `python/tests/` |
 | `web` | FastAPI/WebSocket demo server and browser client | `web/server.py`, `web/static/` |
 | `bench` | Determinism, throughput, and experiment benchmarks | scripts under `bench/` |
 | `data` | Repository-owned data inputs and small artifacts | files under `data/` |

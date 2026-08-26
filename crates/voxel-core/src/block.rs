@@ -100,6 +100,7 @@ pub const RTORCH: u16 = 26;
 pub const REPEATER: u16 = 27;
 pub const LAMP: u16 = 28;
 
+#[allow(clippy::too_many_arguments)]
 const fn b(
     id: u16,
     name: &'static str,
@@ -131,40 +132,417 @@ const fn b(
 }
 
 pub static BLOCKS: &[BlockDef] = &[
-    b(AIR, "air", false, false, true, false, None, 0, None, None, [0, 0, 0], false),
-    b(BEDROCK, "bedrock", true, true, false, false, None, u32::MAX, None, None, [0x33, 0x33, 0x33], false),
-    b(STONE, "stone", true, true, false, false, None, 150, Some((ToolClass::Pickaxe, 1)), Some((COBBLESTONE, 1)), [0x7D, 0x7D, 0x7D], false),
-    b(DIRT, "dirt", true, true, false, false, None, 15, None, Some((DIRT, 1)), [0x8A, 0x5F, 0x3C], false),
-    b(GRASS_BLOCK, "grass_block", true, true, false, false, None, 15, None, Some((DIRT, 1)), [0x6F, 0xA6, 0x53], false),
-    b(SAND, "sand", true, true, false, true, None, 15, None, Some((SAND, 1)), [0xDB, 0xD3, 0xA0], false),
-    b(GRAVEL, "gravel", true, true, false, true, None, 15, None, Some((GRAVEL, 1)), [0x82, 0x7F, 0x7C], false),
-    b(WATER, "water", false, false, true, false, Some(Fluid::Water), 0, None, None, [0x3F, 0x76, 0xE4], false),
-    b(LAVA, "lava", false, false, true, false, Some(Fluid::Lava), 0, None, None, [0xE6, 0x5C, 0x00], false),
-    b(LOG, "log", true, true, false, false, None, 45, None, Some((LOG, 1)), [0x6B, 0x52, 0x30], true),
-    b(LEAVES, "leaves", true, false, false, false, None, 5, None, None, [0x3E, 0x89, 0x48], true),
-    b(PLANKS, "planks", true, true, false, false, None, 30, None, Some((PLANKS, 1)), [0xA0, 0x80, 0x50], true),
-    b(CRAFTING_TABLE, "crafting_table", true, true, false, false, None, 30, None, Some((CRAFTING_TABLE, 1)), [0x7A, 0x5C, 0x33], true),
-    b(FURNACE, "furnace", true, true, false, false, None, 30, Some((ToolClass::Pickaxe, 1)), Some((FURNACE, 1)), [0x6E, 0x6E, 0x6E], false),
-    b(TORCH, "torch", false, false, false, false, None, 5, None, Some((TORCH, 1)), [0xFF, 0xC7, 0x00], false),
-    b(GLASS, "glass", true, false, false, false, None, 15, None, None, [0xC0, 0xE8, 0xF9], false),
-    b(COAL_ORE, "coal_ore", true, true, false, false, None, 150, Some((ToolClass::Pickaxe, 1)), Some((ITEM_COAL, 1)), [0x5A, 0x5A, 0x5A], false),
-    b(IRON_ORE, "iron_ore", true, true, false, false, None, 150, Some((ToolClass::Pickaxe, 2)), Some((IRON_ORE, 1)), [0xD8, 0xAF, 0x93], false),
-    b(DIAMOND_ORE, "diamond_ore", true, true, false, false, None, 150, Some((ToolClass::Pickaxe, 3)), Some((ITEM_DIAMOND, 1)), [0x7F, 0xD6, 0xC2], false),
-    b(COBBLESTONE, "cobblestone", true, true, false, false, None, 150, Some((ToolClass::Pickaxe, 1)), Some((COBBLESTONE, 1)), [0x7A, 0x7A, 0x7A], false),
-    b(DOOR, "door", true, false, false, false, None, 10, None, Some((DOOR, 1)), [0x8B, 0x6B, 0x3D], true),
-    b(WIRE, "wire", false, false, false, false, None, 10, None, Some((WIRE, 1)), [0xB0, 0x30, 0x30], false),
-    b(LEVER, "lever", false, false, false, false, None, 10, None, Some((LEVER, 1)), [0x9A, 0x9A, 0x9A], false),
-    b(FIRE, "fire", false, false, true, false, None, 0, None, None, [0xE2, 0x58, 0x22], false),
-    b(PRESSURE_PLATE, "pressure_plate", false, false, false, false, None, 10, None, Some((PRESSURE_PLATE, 1)), [0xC8, 0xC8, 0xC8], false),
-    b(TNT, "tnt", true, true, false, false, None, 10, None, Some((TNT, 1)), [0xDB, 0x2F, 0x0F], false),
+    b(
+        AIR,
+        "air",
+        false,
+        false,
+        true,
+        false,
+        None,
+        0,
+        None,
+        None,
+        [0, 0, 0],
+        false,
+    ),
+    b(
+        BEDROCK,
+        "bedrock",
+        true,
+        true,
+        false,
+        false,
+        None,
+        u32::MAX,
+        None,
+        None,
+        [0x33, 0x33, 0x33],
+        false,
+    ),
+    b(
+        STONE,
+        "stone",
+        true,
+        true,
+        false,
+        false,
+        None,
+        150,
+        Some((ToolClass::Pickaxe, 1)),
+        Some((COBBLESTONE, 1)),
+        [0x7D, 0x7D, 0x7D],
+        false,
+    ),
+    b(
+        DIRT,
+        "dirt",
+        true,
+        true,
+        false,
+        false,
+        None,
+        15,
+        None,
+        Some((DIRT, 1)),
+        [0x8A, 0x5F, 0x3C],
+        false,
+    ),
+    b(
+        GRASS_BLOCK,
+        "grass_block",
+        true,
+        true,
+        false,
+        false,
+        None,
+        15,
+        None,
+        Some((DIRT, 1)),
+        [0x6F, 0xA6, 0x53],
+        false,
+    ),
+    b(
+        SAND,
+        "sand",
+        true,
+        true,
+        false,
+        true,
+        None,
+        15,
+        None,
+        Some((SAND, 1)),
+        [0xDB, 0xD3, 0xA0],
+        false,
+    ),
+    b(
+        GRAVEL,
+        "gravel",
+        true,
+        true,
+        false,
+        true,
+        None,
+        15,
+        None,
+        Some((GRAVEL, 1)),
+        [0x82, 0x7F, 0x7C],
+        false,
+    ),
+    b(
+        WATER,
+        "water",
+        false,
+        false,
+        true,
+        false,
+        Some(Fluid::Water),
+        0,
+        None,
+        None,
+        [0x3F, 0x76, 0xE4],
+        false,
+    ),
+    b(
+        LAVA,
+        "lava",
+        false,
+        false,
+        true,
+        false,
+        Some(Fluid::Lava),
+        0,
+        None,
+        None,
+        [0xE6, 0x5C, 0x00],
+        false,
+    ),
+    b(
+        LOG,
+        "log",
+        true,
+        true,
+        false,
+        false,
+        None,
+        45,
+        None,
+        Some((LOG, 1)),
+        [0x6B, 0x52, 0x30],
+        true,
+    ),
+    b(
+        LEAVES,
+        "leaves",
+        true,
+        false,
+        false,
+        false,
+        None,
+        5,
+        None,
+        None,
+        [0x3E, 0x89, 0x48],
+        true,
+    ),
+    b(
+        PLANKS,
+        "planks",
+        true,
+        true,
+        false,
+        false,
+        None,
+        30,
+        None,
+        Some((PLANKS, 1)),
+        [0xA0, 0x80, 0x50],
+        true,
+    ),
+    b(
+        CRAFTING_TABLE,
+        "crafting_table",
+        true,
+        true,
+        false,
+        false,
+        None,
+        30,
+        None,
+        Some((CRAFTING_TABLE, 1)),
+        [0x7A, 0x5C, 0x33],
+        true,
+    ),
+    b(
+        FURNACE,
+        "furnace",
+        true,
+        true,
+        false,
+        false,
+        None,
+        30,
+        Some((ToolClass::Pickaxe, 1)),
+        Some((FURNACE, 1)),
+        [0x6E, 0x6E, 0x6E],
+        false,
+    ),
+    b(
+        TORCH,
+        "torch",
+        false,
+        false,
+        false,
+        false,
+        None,
+        5,
+        None,
+        Some((TORCH, 1)),
+        [0xFF, 0xC7, 0x00],
+        false,
+    ),
+    b(
+        GLASS,
+        "glass",
+        true,
+        false,
+        false,
+        false,
+        None,
+        15,
+        None,
+        None,
+        [0xC0, 0xE8, 0xF9],
+        false,
+    ),
+    b(
+        COAL_ORE,
+        "coal_ore",
+        true,
+        true,
+        false,
+        false,
+        None,
+        150,
+        Some((ToolClass::Pickaxe, 1)),
+        Some((ITEM_COAL, 1)),
+        [0x5A, 0x5A, 0x5A],
+        false,
+    ),
+    b(
+        IRON_ORE,
+        "iron_ore",
+        true,
+        true,
+        false,
+        false,
+        None,
+        150,
+        Some((ToolClass::Pickaxe, 2)),
+        Some((IRON_ORE, 1)),
+        [0xD8, 0xAF, 0x93],
+        false,
+    ),
+    b(
+        DIAMOND_ORE,
+        "diamond_ore",
+        true,
+        true,
+        false,
+        false,
+        None,
+        150,
+        Some((ToolClass::Pickaxe, 3)),
+        Some((ITEM_DIAMOND, 1)),
+        [0x7F, 0xD6, 0xC2],
+        false,
+    ),
+    b(
+        COBBLESTONE,
+        "cobblestone",
+        true,
+        true,
+        false,
+        false,
+        None,
+        150,
+        Some((ToolClass::Pickaxe, 1)),
+        Some((COBBLESTONE, 1)),
+        [0x7A, 0x7A, 0x7A],
+        false,
+    ),
+    b(
+        DOOR,
+        "door",
+        true,
+        false,
+        false,
+        false,
+        None,
+        10,
+        None,
+        Some((DOOR, 1)),
+        [0x8B, 0x6B, 0x3D],
+        true,
+    ),
+    b(
+        WIRE,
+        "wire",
+        false,
+        false,
+        false,
+        false,
+        None,
+        10,
+        None,
+        Some((WIRE, 1)),
+        [0xB0, 0x30, 0x30],
+        false,
+    ),
+    b(
+        LEVER,
+        "lever",
+        false,
+        false,
+        false,
+        false,
+        None,
+        10,
+        None,
+        Some((LEVER, 1)),
+        [0x9A, 0x9A, 0x9A],
+        false,
+    ),
+    b(
+        FIRE,
+        "fire",
+        false,
+        false,
+        true,
+        false,
+        None,
+        0,
+        None,
+        None,
+        [0xE2, 0x58, 0x22],
+        false,
+    ),
+    b(
+        PRESSURE_PLATE,
+        "pressure_plate",
+        false,
+        false,
+        false,
+        false,
+        None,
+        10,
+        None,
+        Some((PRESSURE_PLATE, 1)),
+        [0xC8, 0xC8, 0xC8],
+        false,
+    ),
+    b(
+        TNT,
+        "tnt",
+        true,
+        true,
+        false,
+        false,
+        None,
+        10,
+        None,
+        Some((TNT, 1)),
+        [0xDB, 0x2F, 0x0F],
+        false,
+    ),
     // redstone torch: NOT gate. Input = cell below; output = 4 horizontal
     // neighbors + the cell above. State bit0 = lit.
-    b(RTORCH, "redstone_torch", false, false, false, false, None, 5, None, Some((RTORCH, 1)), [0xFF, 0x55, 0x00], false),
+    b(
+        RTORCH,
+        "redstone_torch",
+        false,
+        false,
+        false,
+        false,
+        None,
+        5,
+        None,
+        Some((RTORCH, 1)),
+        [0xFF, 0x55, 0x00],
+        false,
+    ),
     // repeater: diode + unit delay + signal refresh to 15. State bits0-1 =
     // facing (0:+z, 1:-x, 2:-z, 3:+x — output side), bit2 = output on.
-    b(REPEATER, "repeater", false, false, false, false, None, 10, None, Some((REPEATER, 1)), [0xB0, 0x60, 0x60], false),
+    b(
+        REPEATER,
+        "repeater",
+        false,
+        false,
+        false,
+        false,
+        None,
+        10,
+        None,
+        Some((REPEATER, 1)),
+        [0xB0, 0x60, 0x60],
+        false,
+    ),
     // lamp: pure sink; lit while any 6-neighbor is powered. State bit0.
-    b(LAMP, "lamp", true, true, false, false, None, 30, None, Some((LAMP, 1)), [0xE0, 0xB0, 0x50], false),
+    b(
+        LAMP,
+        "lamp",
+        true,
+        true,
+        false,
+        false,
+        None,
+        30,
+        None,
+        Some((LAMP, 1)),
+        [0xE0, 0xB0, 0x50],
+        false,
+    ),
 ];
 
 // ---- Items ----
@@ -185,16 +563,73 @@ pub struct ItemDef {
 }
 
 pub static ITEMS: &[ItemDef] = &[
-    ItemDef { id: ITEM_STICK, name: "stick", tool: None },
-    ItemDef { id: ITEM_WOODEN_PICKAXE, name: "wooden_pickaxe", tool: Some((ToolClass::Pickaxe, 1)) },
-    ItemDef { id: ITEM_STONE_PICKAXE, name: "stone_pickaxe", tool: Some((ToolClass::Pickaxe, 2)) },
-    ItemDef { id: ITEM_IRON_PICKAXE, name: "iron_pickaxe", tool: Some((ToolClass::Pickaxe, 3)) },
-    ItemDef { id: ITEM_COAL, name: "coal", tool: None },
-    ItemDef { id: ITEM_IRON_INGOT, name: "iron_ingot", tool: None },
-    ItemDef { id: ITEM_DIAMOND, name: "diamond", tool: None },
+    ItemDef {
+        id: ITEM_STICK,
+        name: "stick",
+        tool: None,
+    },
+    ItemDef {
+        id: ITEM_WOODEN_PICKAXE,
+        name: "wooden_pickaxe",
+        tool: Some((ToolClass::Pickaxe, 1)),
+    },
+    ItemDef {
+        id: ITEM_STONE_PICKAXE,
+        name: "stone_pickaxe",
+        tool: Some((ToolClass::Pickaxe, 2)),
+    },
+    ItemDef {
+        id: ITEM_IRON_PICKAXE,
+        name: "iron_pickaxe",
+        tool: Some((ToolClass::Pickaxe, 3)),
+    },
+    ItemDef {
+        id: ITEM_COAL,
+        name: "coal",
+        tool: None,
+    },
+    ItemDef {
+        id: ITEM_IRON_INGOT,
+        name: "iron_ingot",
+        tool: None,
+    },
+    ItemDef {
+        id: ITEM_DIAMOND,
+        name: "diamond",
+        tool: None,
+    },
 ];
 
 pub const MAX_STACK: u16 = 64;
+
+/// Whether `id` names a block in the canonical registry.
+///
+/// Cell state occupies the high nibble, so every state value representable by
+/// [`make_cell`] is legal. Only the low 12-bit block ID needs registry
+/// validation before a cell crosses a public mutation or persistence boundary.
+#[inline]
+pub fn is_known_block(id: u16) -> bool {
+    BLOCKS
+        .get(id as usize)
+        .is_some_and(|definition| definition.id == id)
+}
+
+/// Validate a raw encoded cell without indexing the block registry.
+pub fn validate_cell(cell: u16) -> Result<(), String> {
+    let id = cell_id(cell);
+    if is_known_block(id) {
+        Ok(())
+    } else {
+        Err(format!("unknown block id {id} in cell {cell}"))
+    }
+}
+
+/// Whether `id` names an inventory/item-entity value in the canonical
+/// registry. Block item forms and explicit item-only IDs are both accepted.
+#[inline]
+pub fn is_known_item(id: u16) -> bool {
+    item_name(id).is_some()
+}
 
 #[inline]
 pub fn block_def(id: u16) -> &'static BlockDef {
@@ -259,6 +694,18 @@ mod tests {
     }
 
     #[test]
+    fn raw_cell_validation_accepts_all_state_bits_but_rejects_unknown_ids() {
+        assert!(validate_cell(make_cell(STONE, 15)).is_ok());
+        assert_eq!(
+            validate_cell(u16::MAX).unwrap_err(),
+            "unknown block id 4095 in cell 65535"
+        );
+        assert!(is_known_item(STONE));
+        assert!(is_known_item(ITEM_IRON_PICKAXE));
+        assert!(!is_known_item(u16::MAX));
+    }
+
+    #[test]
     fn names_unique() {
         let names: HashSet<&str> = BLOCKS.iter().map(|d| d.name).collect();
         assert_eq!(names.len(), BLOCKS.len());
@@ -272,7 +719,12 @@ mod tests {
         for d in BLOCKS {
             if let Some((item, n)) = d.drops {
                 assert!(n > 0);
-                assert!(item_name(item).is_some(), "{} drops unknown item {}", d.name, item);
+                assert!(
+                    item_name(item).is_some(),
+                    "{} drops unknown item {}",
+                    d.name,
+                    item
+                );
             }
         }
     }

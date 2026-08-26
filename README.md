@@ -12,7 +12,7 @@ A from-scratch voxel physics simulator (no Mojang code or assets, Apache-2.0) wh
 | Throughput | ~55–190 steps/s/instance | **321k steps/s single env, 1.03M on 64 envs** (measured) |
 | Determinism | no — entity tick order, GC, JVM jitter | **bit-exact**: seed + action sequence → identical world hash (xxh3), snapshot/restore mid-episode |
 | Ground truth | pixels only | per-tick voxel window (block ids+states), depth, segmentation, **surface normals**, LiDAR range image, full world snapshots |
-| Physics | fixed, closed, 20 TPS lock | **rule-table driven and ablatable** — gravity, fluid spread, gate delay, fall damage… are config fields; **voxel scale knob**: `scale=2` runs the same physical world at 0.5 m cells |
+| Physics | fixed, closed, 20 TPS lock | **rule-table driven and ablatable** — gravity, fluid spread, gate delay, fall damage… are config fields; exact rational clocks and a **voxel scale knob** let the same physical world run at different tick rates and spatial resolutions |
 | Sensors | screen capture | CPU DDA camera (rgb/depth/seg, exact by construction) + **spinning LiDAR model** (0.4 ms/scan) with seeded noise |
 | Legality | EULA forbids redistribution | Apache-2.0, zero Minecraft assets |
 | Task solvability | unknown | every probe task validates solvability at generation by branch simulation; oracle experts gated ≥ 0.95 |
@@ -33,7 +33,36 @@ The page auto-cycles the curriculum (showcase mode). Talking points as it runs:
 4. **Speed** — `python bench/throughput.py --envs 64 --ticks 100000`: ~1M world-ticks/s on one desktop CPU. A Java MC stack manages ~190.
 5. **Ablatable physics** — the training world is a hypothesis you can edit: change gravity or fluid spread in `PhysicsConfig`, retrain, and ask whether the model learned *physics* or learned *Minecraft*.
 6. **The world is a digital circuit simulator** — torches are NOT gates with unit delay, wire joins are wired-OR: RS latches store bits and 3-torch rings oscillate at exactly 2× the stage count (tested). Task `logic_probe` trains input→output reasoning on real gate-level causality.
-7. **Every episode is a dataset shard** — Parquet with actions, voxel windows, frames, and world checkpoints every 600 ticks; `replay.py --verify` re-executes the action log and asserts the final hash.
+7. **Every episode is a causal dataset** — Episode Bundle v2 separates transitions, semantic events, exact deltas, and complete environment checkpoints; `replay.py --verify` re-executes actions and checks world/task/reward/sensor/causal equivalence.
+
+## Physical spacetime and causal supervision
+
+World Snapshot v8 stores an immutable reduced-rational simulation clock. The
+default remains exactly 20 Hz; changing the tick duration rescales physical
+rates and quantizes timers without changing the default trajectory. Spatial
+interfaces distinguish voxel cells, continuous world coordinates, metric
+coordinates, poses, AABBs, frames, and stable semantic IDs. The Python oracle
+exposes collision-consistent reachability, shortest paths, visibility, scene
+objects, metric kinematics, and clock/sample-age metadata.
+
+Normal `step()` remains the high-throughput path. `step_traced()` derives a
+rooted event DAG and, at full level, exact state deltas and boundary hashes.
+Tagged interventions support deterministic fork → intervene → rollout →
+compare experiments without Python mutation closures. These traces never drive
+physics: World State remains the sole truth source.
+
+```python
+from voxelgym import VoxelGymEnv
+
+env = VoxelGymEnv(preset="flat", dt_numerator=1, dt_denominator=40,
+                  spacetime=True)
+obs, info = env.reset(seed=7)
+obs, reward, terminated, truncated, info = env.step_traced(
+    {key: 0 for key in env.action_space.spaces}, trace_level="full"
+)
+checkpoint = env.snapshot().to_bytes()
+oracle = env.oracle_view()  # recorder-only; never inserted into policy input
+```
 
 ## The curriculum (20 tasks, oracle-gated ≥ 0.95)
 
@@ -82,6 +111,8 @@ maturin develop --release -m crates/voxel-py/Cargo.toml   # or scripts/build_dev
 cargo test --workspace --release && pytest python/tests -q
 
 python -m voxelgym.experts --task smelt_iron --episodes 20   # oracle gate
+python -m voxelgym.experts --task collapse_judge --episodes 1 --record data/v2 --format 2
+python -m voxelgym.replay data/v2/<episode>.vxbundle --verify
 python bench/determinism.py --seed 42 --ticks 20000
 python bench/throughput.py --envs 64 --ticks 100000
 python web/server.py                                          # live demo

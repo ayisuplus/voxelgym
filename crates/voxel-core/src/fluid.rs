@@ -7,12 +7,15 @@
 //!   - non-source: support = min(4-neighbor min effective level + 1,
 //!     falling inflow from above = 8); no support -> drain to air
 //!   - water with two horizontal source neighbors and solid below -> source
+//!
 //! Expansion: down into replaceable -> falling (8); horizontal from level
 //! L < max -> L+1; a falling cell with solid below spreads as level 1.
+//!
 //! Contact reactions (expansion into the other fluid):
 //!   - water into lava SOURCE  -> that cell becomes stone
 //!   - lava into water         -> that cell becomes cobblestone
 //!   - water into flowing lava -> blocked (contract specifies no reaction)
+//!
 //! Determinism: cells processed in sorted order; changes collected then
 //! applied per pass.
 
@@ -102,12 +105,16 @@ fn recompute(world: &World, x: i32, y: i32, z: i32, f: Fluid, cur_state: u16) ->
     }
 }
 
+#[allow(clippy::manual_is_multiple_of)] // Preserve the historical zero-period panic.
 pub fn tick_fluids(world: &mut World, dirty: &[(i32, i32, i32)]) {
     // seed active set from this tick's changes
     for &(x, y, z) in dirty {
         for (dx, dy, dz) in [(0, 0, 0)].into_iter().chain(DIRS6) {
             let c = (x + dx, y + dy, z + dz);
-            if block_def(cell_id(world.peek_block(c.0, c.1, c.2))).fluid.is_some() {
+            if block_def(cell_id(world.peek_block(c.0, c.1, c.2)))
+                .fluid
+                .is_some()
+            {
                 world.active_fluids.insert(c);
             }
         }
@@ -362,7 +369,11 @@ mod tests {
             step(&mut w, &idle());
         }
         assert_eq!(cell_id(w.get_block(11, 6, 10)), WATER);
-        assert_eq!(cell_state(w.get_block(11, 6, 10)), 0, "merged into a source");
+        assert_eq!(
+            cell_state(w.get_block(11, 6, 10)),
+            0,
+            "merged into a source"
+        );
     }
 
     #[test]
@@ -379,7 +390,11 @@ mod tests {
             step(&mut w, &idle());
         }
         for d in 1..=7 {
-            assert_eq!(cell_id(w.get_block(10 + d, 6, 10)), AIR, "level {d} should drain");
+            assert_eq!(
+                cell_id(w.get_block(10 + d, 6, 10)),
+                AIR,
+                "level {d} should drain"
+            );
         }
     }
 
@@ -391,7 +406,11 @@ mod tests {
         for _ in 0..200 {
             step(&mut w, &idle());
         }
-        assert_eq!(w.get_block(10, 6, 10), STONE, "water reached lava source -> stone");
+        assert_eq!(
+            w.get_block(10, 6, 10),
+            STONE,
+            "water reached lava source -> stone"
+        );
     }
 
     #[test]

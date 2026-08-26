@@ -38,7 +38,10 @@ pub fn repeater_dir(state: u16) -> (i32, i32, i32) {
 }
 
 pub fn is_circuit(id: u16) -> bool {
-    matches!(id, WIRE | LEVER | DOOR | PRESSURE_PLATE | RTORCH | REPEATER | LAMP)
+    matches!(
+        id,
+        WIRE | LEVER | DOOR | PRESSURE_PLATE | RTORCH | REPEATER | LAMP
+    )
 }
 
 /// A cell that actively drives power right now (source semantics), given
@@ -225,11 +228,16 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
                 let behind = (x - d.0, y - d.1, z - d.2);
                 let out = powered(world, behind);
                 if (st & 4 == 4) != out {
-                    updates.push(((x, y, z), make_cell(REPEATER, (st & 3) | ((out as u16) << 2))));
+                    updates.push((
+                        (x, y, z),
+                        make_cell(REPEATER, (st & 3) | ((out as u16) << 2)),
+                    ));
                 }
             }
             LAMP => {
-                let lit = DIRS6.iter().any(|d| powered(world, (x + d.0, y + d.1, z + d.2)));
+                let lit = DIRS6
+                    .iter()
+                    .any(|d| powered(world, (x + d.0, y + d.1, z + d.2)));
                 if (st & 1 == 1) != lit {
                     updates.push(((x, y, z), make_cell(LAMP, lit as u16)));
                 }
@@ -281,6 +289,10 @@ pub fn tick_circuits(world: &mut World, dirty: &[(i32, i32, i32)]) {
 
 /// Register/unregister circuit cells on block changes (called from set_block).
 pub fn on_cell_changed(world: &mut World, x: i32, y: i32, z: i32, old: u16, new: u16) {
+    // A non-default clock may defer the next synchronous circuit phase.
+    // Preserve the wake-up across that boundary even after the shared dirty
+    // queue has been consumed by fluids/fire.
+    world.circuit_settled = false;
     let old_id = cell_id(old);
     let new_id = cell_id(new);
     if old_id == PRESSURE_PLATE && new_id != PRESSURE_PLATE {
@@ -341,7 +353,7 @@ mod tests {
         w.set_block(2, 6, 2, make_cell(LEVER, 1)); // ON
         let n = 16;
         for i in 0..n {
-            w.set_block(3 + i as i32, 6, 2, WIRE);
+            w.set_block(3 + i, 6, 2, WIRE);
         }
         step(&mut w, &idle());
         for i in 0..14 {
@@ -428,7 +440,12 @@ mod tests {
         settle(&mut w);
         assert!(power_of(&w, 5, 7, 3) > 0, "NOR(0,0)=1");
         assert_eq!(cell_state(w.peek_block(6, 7, 3)) & 1, 1, "lamp lit");
-        for (a, b, want) in [(1u16, 0u16, false), (0, 1, false), (1, 1, false), (0, 0, true)] {
+        for (a, b, want) in [
+            (1u16, 0u16, false),
+            (0, 1, false),
+            (1, 1, false),
+            (0, 0, true),
+        ] {
             w.set_block(2, 6, 2, make_cell(LEVER, a));
             w.set_block(2, 6, 4, make_cell(LEVER, b));
             settle(&mut w);
@@ -578,7 +595,11 @@ mod tests {
         // unit delay: the repeater's out-bit updates after this tick's solve
         assert_eq!(power_of(&w, 7, 6, 2), 0, "output not yet driven (delay)");
         step(&mut w, &idle());
-        assert_eq!(cell_state(w.peek_block(6, 6, 2)) & 4, 4, "repeater out high");
+        assert_eq!(
+            cell_state(w.peek_block(6, 6, 2)) & 4,
+            4,
+            "repeater out high"
+        );
         assert_eq!(power_of(&w, 7, 6, 2), 15, "signal refreshed to 15");
         assert!(power_of(&w, 9, 6, 2) > 0);
     }

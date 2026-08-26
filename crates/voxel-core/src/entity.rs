@@ -140,7 +140,13 @@ pub fn aabb_collides(world: &mut World, min: [f64; 3], max: [f64; 3]) -> bool {
 
 /// Move an AABB along one axis with clipping against solid cells.
 /// Returns the actual displacement applied (<= requested).
-pub(crate) fn clip_axis(world: &mut World, min: &mut [f64; 3], max: &mut [f64; 3], axis: usize, d: f64) -> f64 {
+pub(crate) fn clip_axis(
+    world: &mut World,
+    min: &mut [f64; 3],
+    max: &mut [f64; 3],
+    axis: usize,
+    d: f64,
+) -> f64 {
     if d == 0.0 {
         return 0.0;
     }
@@ -228,8 +234,15 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
     // or F_air (weak air control). Acceleration = F / m (Newton). Defaults
     // (m=1, F_g=0.1, F_a=0.02) reproduce the MC constants exactly.
     let ph = world.physics;
-    let speed = ph.walk_speed * if input.sneak { ph.sneak_mult } else { 1.0 } * if in_water { WATER_H_MULT } else { 1.0 };
-    let force_limit = if world.agent.on_ground { ph.ground_force } else { ph.air_force };
+    let step_ratio = world.clock_config().default_step_ratio();
+    let speed = ph.walk_speed
+        * if input.sneak { ph.sneak_mult } else { 1.0 }
+        * if in_water { WATER_H_MULT } else { 1.0 };
+    let force_limit = if world.agent.on_ground {
+        ph.ground_force
+    } else {
+        ph.air_force
+    };
     let accel = force_limit / ph.agent_mass;
     let tx = input.wish_x * speed;
     let tz = input.wish_z * speed;
@@ -250,13 +263,24 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
     let mut min = world.agent.aabb_min();
     let mut max = world.agent.aabb_max();
     let vel = world.agent.vel;
+    let water_addend = -WATER_SINK * ph.scale
+        + if input.jump {
+            WATER_SWIM_UP * ph.scale
+        } else {
+            0.0
+        };
+    let requested_dy = if in_water {
+        crate::physics::damped_step(vel[1], WATER_VY_MULT, water_addend, step_ratio).0
+    } else {
+        crate::physics::gravity_step(vel[1], ph.gravity, ph.gravity_mult, step_ratio).0
+    };
 
-    let dy = clip_axis(world, &mut min, &mut max, 1, vel[1]);
-    if vel[1] < 0.0 {
+    let dy = clip_axis(world, &mut min, &mut max, 1, requested_dy);
+    if requested_dy < 0.0 {
         if !in_water {
             world.agent.fall_distance += -dy;
         }
-        if dy != vel[1] {
+        if dy != requested_dy {
             // landed
             world.agent.on_ground = true;
             if !in_water {
@@ -277,8 +301,8 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
         } else {
             world.agent.on_ground = false;
         }
-    } else if vel[1] > 0.0 {
-        if dy != vel[1] {
+    } else if requested_dy > 0.0 {
+        if dy != requested_dy {
             world.agent.vel[1] = 0.0; // bumped head
         }
         world.agent.on_ground = false;
@@ -293,11 +317,7 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
         world.agent.vel[2] = 0.0;
     }
 
-    world.agent.pos = [
-        (min[0] + max[0]) / 2.0,
-        min[1],
-        (min[2] + max[2]) / 2.0,
-    ];
+    world.agent.pos = [(min[0] + max[0]) / 2.0, min[1], (min[2] + max[2]) / 2.0];
 
     // --- gravity / buoyancy for the NEXT tick's displacement ---
     // Force law: F_g = -m*g (mass-independent accel g; Newtonian) plus a
@@ -305,13 +325,25 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
     // form, kept verbatim for literature comparability).
     if in_water {
         let sc = ph.scale;
-        let mut vy = world.agent.vel[1] * WATER_VY_MULT - WATER_SINK * sc;
-        if input.jump {
-            vy += WATER_SWIM_UP * sc;
-        }
+        let vy = if step_ratio == 1.0 {
+            let mut next = world.agent.vel[1] * WATER_VY_MULT - WATER_SINK * sc;
+            if input.jump {
+                next += WATER_SWIM_UP * sc;
+            }
+            next
+        } else {
+            crate::physics::damped_step(world.agent.vel[1], WATER_VY_MULT, water_addend, step_ratio)
+                .1
+        };
         world.agent.vel[1] = vy.clamp(ph.terminal_vy, 1.0 * sc);
     } else {
-        world.agent.vel[1] = (world.agent.vel[1] - ph.gravity) * ph.gravity_mult;
+        world.agent.vel[1] = crate::physics::gravity_step(
+            world.agent.vel[1],
+            ph.gravity,
+            ph.gravity_mult,
+            step_ratio,
+        )
+        .1;
         if world.agent.vel[1] < ph.terminal_vy {
             world.agent.vel[1] = ph.terminal_vy;
         }
@@ -326,7 +358,11 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
     );
     if head_solid {
         world.agent.suffocation_timer += 1;
-        if world.agent.suffocation_timer % 20 == 0 {
+        let period = world
+            .clock_config()
+            .ticks_for_default_ticks(20)
+            .min(u32::MAX as u64) as u32;
+        if world.agent.suffocation_timer.is_multiple_of(period) {
             world.agent.hp -= world.physics.suffocate_damage;
             if world.agent.hp <= 0 {
                 world.agent.hp = 0;
@@ -346,7 +382,11 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
     let in_lava = feet_fluid == Some(Fluid::Lava) || eye_fluid == Some(Fluid::Lava);
     if in_lava {
         world.agent.lava_timer += 1;
-        if world.agent.lava_timer % 10 == 0 {
+        let period = world
+            .clock_config()
+            .ticks_for_default_ticks(10)
+            .min(u32::MAX as u64) as u32;
+        if world.agent.lava_timer.is_multiple_of(period) {
             world.agent.hp -= world.physics.lava_damage;
             if world.agent.hp <= 0 {
                 world.agent.hp = 0;
@@ -365,7 +405,11 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
     ));
     if feet_id == FIRE {
         world.agent.fire_timer += 1;
-        if world.agent.fire_timer % 10 == 0 {
+        let period = world
+            .clock_config()
+            .ticks_for_default_ticks(10)
+            .min(u32::MAX as u64) as u32;
+        if world.agent.fire_timer.is_multiple_of(period) {
             world.agent.hp -= 1;
             if world.agent.hp <= 0 {
                 world.agent.hp = 0;
@@ -388,7 +432,12 @@ mod tests {
     }
 
     fn idle() -> MoveInput {
-        MoveInput { wish_x: 0.0, wish_z: 0.0, jump: false, sneak: false }
+        MoveInput {
+            wish_x: 0.0,
+            wish_z: 0.0,
+            jump: false,
+            sneak: false,
+        }
     }
 
     #[test]
@@ -410,7 +459,11 @@ mod tests {
         while !w.agent.on_ground {
             tick_agent(&mut w, &idle());
         }
-        assert_eq!(w.agent.hp, MAX_HP - 7, "fall of 10 -> floor(10-3)=7 half-hearts");
+        assert_eq!(
+            w.agent.hp,
+            MAX_HP - 7,
+            "fall of 10 -> floor(10-3)=7 half-hearts"
+        );
     }
 
     #[test]
@@ -433,12 +486,21 @@ mod tests {
             }
         }
         w.agent.pos = [8.5, 5.0, 8.5];
-        let input = MoveInput { wish_x: 1.0, wish_z: 0.0, jump: false, sneak: false };
+        let input = MoveInput {
+            wish_x: 1.0,
+            wish_z: 0.0,
+            jump: false,
+            sneak: false,
+        };
         for _ in 0..40 {
             tick_agent(&mut w, &input);
         }
         // must never penetrate the wall face at x=10 (AABB max x <= 10)
-        assert!(w.agent.pos[0] + HALF_WIDTH <= 10.0 + 1e-6, "x={}", w.agent.pos[0]);
+        assert!(
+            w.agent.pos[0] + HALF_WIDTH <= 10.0 + 1e-6,
+            "x={}",
+            w.agent.pos[0]
+        );
         assert!(w.agent.vel[0].abs() < 1e-9);
     }
 
@@ -447,7 +509,12 @@ mod tests {
         let mut w = flat_world();
         w.agent.pos = [8.5, 5.0, 8.5];
         w.agent.on_ground = true;
-        let input = MoveInput { wish_x: 0.0, wish_z: 0.0, jump: true, sneak: false };
+        let input = MoveInput {
+            wish_x: 0.0,
+            wish_z: 0.0,
+            jump: true,
+            sneak: false,
+        };
         let mut apex = 5.0f64;
         for _ in 0..40 {
             tick_agent(&mut w, &input);
@@ -461,7 +528,12 @@ mod tests {
     fn walk_speed_capped() {
         let mut w = flat_world();
         w.agent.pos = [8.5, 5.0, 8.5];
-        let input = MoveInput { wish_x: 0.0, wish_z: 1.0, jump: false, sneak: false };
+        let input = MoveInput {
+            wish_x: 0.0,
+            wish_z: 1.0,
+            jump: false,
+            sneak: false,
+        };
         for _ in 0..30 {
             tick_agent(&mut w, &input);
         }
@@ -493,13 +565,20 @@ mod tests {
         // leaves gravity (jump apex) untouched
         fn run(mass: f64) -> (f64, f64) {
             let mut w = World::new(1, Preset::Flat, Vec::new());
-            let mut ph = Physics::default();
-            ph.agent_mass = mass;
+            let ph = Physics {
+                agent_mass: mass,
+                ..Physics::default()
+            };
             w.physics = ph;
             w.agent.pos = [8.5, 5.0, 8.5];
             w.agent.on_ground = true;
             // ticks to reach 90% of walk speed from rest
-            let input = MoveInput { wish_x: 0.0, wish_z: 1.0, jump: false, sneak: false };
+            let input = MoveInput {
+                wish_x: 0.0,
+                wish_z: 1.0,
+                jump: false,
+                sneak: false,
+            };
             let mut ticks = 0;
             while w.agent.vel[2] < 0.9 * w.physics.walk_speed && ticks < 100 {
                 tick_agent(&mut w, &input);
@@ -507,12 +586,19 @@ mod tests {
             }
             // jump apex
             let mut w2 = World::new(1, Preset::Flat, Vec::new());
-            let mut ph2 = Physics::default();
-            ph2.agent_mass = mass;
+            let ph2 = Physics {
+                agent_mass: mass,
+                ..Physics::default()
+            };
             w2.physics = ph2;
             w2.agent.pos = [8.5, 5.0, 8.5];
             w2.agent.on_ground = true;
-            let jump = MoveInput { wish_x: 0.0, wish_z: 0.0, jump: true, sneak: false };
+            let jump = MoveInput {
+                wish_x: 0.0,
+                wish_z: 0.0,
+                jump: true,
+                sneak: false,
+            };
             let mut apex = 5.0f64;
             for _ in 0..40 {
                 tick_agent(&mut w2, &jump);
@@ -523,7 +609,10 @@ mod tests {
         let (t1, a1) = run(1.0);
         let (t2, a2) = run(2.0);
         assert!(t2 > t1, "heavier accelerates slower: {t1} vs {t2}");
-        assert!((a1 - a2).abs() < 1e-9, "gravity is mass-independent: {a1} vs {a2}");
+        assert!(
+            (a1 - a2).abs() < 1e-9,
+            "gravity is mass-independent: {a1} vs {a2}"
+        );
     }
 
     #[test]

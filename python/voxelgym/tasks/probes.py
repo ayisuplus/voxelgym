@@ -12,21 +12,34 @@ import math
 import numpy as np
 
 from .. import ids
-from .base import Task
+from .base import RewardOutcome, Task, evidence_event_ids
+from .metric import (
+    agent_position_meters,
+    metric_all_blocks_are,
+    metric_any_block_is,
+    metric_cell_volume,
+    metric_get_block,
+    metric_set_block,
+    metric_set_cell_interventions,
+    metric_set_cells_interventions,
+    teleport_meters,
+)
 
 
 def _reg(x0, y0, z0, x1, y1, z1, cell):
     return (x0, y0, z0, x1, y1, z1, cell)
 
 
-def _branch_sim(world, mutate=None, ticks: int = 300):
-    """Clone the world, optionally mutate, simulate, return the clone."""
-    import voxelgym_rs as rs
+def _branch_sim(world, interventions=None, ticks: int = 300):
+    """Fork, apply tagged interventions, roll out, and return the branch."""
 
-    scratch = rs.PyWorld(0, "void")
-    scratch.restore(world.snapshot())
-    if mutate is not None:
-        mutate(scratch)
+    scratch = world.fork()
+    for intervention_id, spec in enumerate(interventions or ()):
+        scratch.apply_intervention(
+            spec,
+            trace_level="off",
+            intervention_id=intervention_id,
+        )
     for _ in range(ticks):
         scratch.step((0, 0, 0, 0, 4, 0, 0, 0, 0, 0))
     return scratch
@@ -71,43 +84,79 @@ class CollapseJudge(Task):
     def _truth(self, world) -> bool:
         """True iff the slab collapses when tail supports are removed."""
 
-        def remove(mut_world):
-            for i in range(self.supported, self.SLAB_LEN):
-                x = self.SLAB_X0 + i
-                for z in range(self.SLAB_Z[0], self.SLAB_Z[1] + 1):
-                    mut_world.set_block(x, self.SLAB_Y - 1, z, 0)
-
-        clone = _branch_sim(world, remove, ticks=40)
+        interventions = self._support_removal_interventions(world)
+        clone = _branch_sim(world, interventions, ticks=40)
         # collapsed iff any falling entity spawned or any slab cell left y=SLAB_Y
         for i in range(self.supported, self.SLAB_LEN):
             x = self.SLAB_X0 + i
             for z in range(self.SLAB_Z[0], self.SLAB_Z[1] + 1):
-                if clone.get_block(x, self.SLAB_Y, z) & 0xFFF != ids.SAND:
+                if not metric_all_blocks_are(clone, (x, self.SLAB_Y, z), ids.SAND):
                     return True
         return False
+
+    def _support_removal_interventions(self, world):
+        """Exact engine-cell interventions for the logical tail supports."""
+
+        return [
+            spec
+            for i in range(self.supported, self.SLAB_LEN)
+            for z in range(self.SLAB_Z[0], self.SLAB_Z[1] + 1)
+            for spec in metric_set_cell_interventions(
+                world,
+                (self.SLAB_X0 + i, self.SLAB_Y - 1, z),
+                0,
+            )
+        ]
 
     def on_reset(self, world, rng: np.random.Generator):
         self.collapses = self._truth(world)
         self._done = False
-        world.teleport(-8.5, 6.0, 0.5)  # between the pads, facing the slab
+        self._committed = False
+        self._answered_collapse = None
+        teleport_meters(world, (-8.5, 6.0, 0.5))  # between the pads, facing the slab
 
-    def step_reward(self, world):
-        if self._done:
-            return 0.0, False
-        x, y, z = world.agent_pos()
+    @staticmethod
+    def _answer_at(world):
+        x, _, z = agent_position_meters(world)
         on_collapse = abs(x - (-4.5)) <= 1.5 and abs(z - (-2.5)) <= 1.5
         on_holds = abs(x - (-4.5)) <= 1.5 and abs(z - 3.5) <= 1.5
         if not (on_collapse or on_holds):
-            return 0.0, False
-        answered_collapse = on_collapse
-        # commit: drop the tail supports in the real world
-        for i in range(self.supported, self.SLAB_LEN):
-            sx = self.SLAB_X0 + i
-            for sz in range(self.SLAB_Z[0], self.SLAB_Z[1] + 1):
-                world.set_block(sx, self.SLAB_Y - 1, sz, 0)
-        self._done = True
-        correct = answered_collapse == self.collapses
-        return (1.0 if correct else 0.0), True
+            return None
+        return on_collapse
+
+    def interventions_before_step(self, world, action):
+        """Commit the answer and describe every support removal explicitly."""
+        if self._done or self._committed:
+            return []
+        answered_collapse = self._answer_at(world)
+        if answered_collapse is None:
+            return []
+        specs = self._support_removal_interventions(world)
+        self._answered_collapse = answered_collapse
+        self._committed = True
+        return specs
+
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
+        if self._done or not self._committed:
+            return RewardOutcome()
+        correct = self._answered_collapse == self.collapses
+        reward = 1.0 if correct else 0.0
+        reason = "correct_answer" if correct else "incorrect_answer"
+        answer = "collapse" if self._answered_collapse else "holds"
+        return RewardOutcome(
+            total=reward,
+            components={"correctness": reward},
+            terminated=True,
+            termination_reason=reason,
+            evidence_event_ids=evidence_event_ids(
+                events, kinds=("intervention_applied",)
+            ),
+            evidence_labels=(
+                "task:collapse_judge:supports_removed",
+                f"task:collapse_judge:answer:{answer}",
+            ),
+            task_state_updates={"_done": True},
+        )
 
 
 class WaterRouting(Task):
@@ -142,20 +191,28 @@ class WaterRouting(Task):
     def on_reset(self, world, rng: np.random.Generator):
         # solvability validation at generation: dig the channel in a clone,
         # water must reach the target
-        def solve(w):
-            for c in self.DIG_CELLS:
-                w.set_block(*c, 0)
-
-        clone = _branch_sim(world, solve, ticks=400)
-        wet = clone.get_block(*self.TARGET) & 0xFFF == ids.WATER
+        interventions = metric_set_cells_interventions(world, self.DIG_CELLS, 0)
+        clone = _branch_sim(world, interventions, ticks=400)
+        wet = metric_any_block_is(clone, self.TARGET, ids.WATER)
         if not wet:
             raise RuntimeError("water_routing scene unsolvable (generation bug)")
-        world.teleport(3.5, 5.0, 2.5)
+        teleport_meters(world, (3.5, 5.0, 2.5))
 
-    def step_reward(self, world):
-        if world.get_block(*self.TARGET) & 0xFFF == ids.WATER:
-            return 1.0, True
-        return 0.0, False
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
+        if metric_any_block_is(world, self.TARGET, ids.WATER):
+            return RewardOutcome(
+                total=1.0,
+                components={"success": 1.0},
+                terminated=True,
+                termination_reason="water_reached_target",
+                evidence_event_ids=evidence_event_ids(
+                    events,
+                    kinds=("fluid_changed",),
+                    locations=set(metric_cell_volume(world, self.TARGET)),
+                ),
+                evidence_labels=("task:water_routing:target_wet",),
+            )
+        return RewardOutcome()
 
 
 class BridgeOverLava(Task):
@@ -182,13 +239,22 @@ class BridgeOverLava(Task):
 
     def on_reset(self, world, rng: np.random.Generator):
         world.give(ids.PLANKS, 20)
-        world.teleport(8.5, 5.0, 0.5)
+        teleport_meters(world, (8.5, 5.0, 0.5))
 
-    def step_reward(self, world):
-        x, y, z = world.agent_pos()
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
+        x, y, z = agent_position_meters(world)
         if math.hypot(x - self.PAD[0], z - self.PAD[2]) <= 1.5 and y >= 4.5:
-            return 1.0, True
-        return 0.0, False
+            return RewardOutcome(
+                total=1.0,
+                components={"success": 1.0},
+                terminated=True,
+                termination_reason="target_reached",
+                evidence_event_ids=evidence_event_ids(
+                    events, kinds=("agent_moved",)
+                ),
+                evidence_labels=("task:bridge_over_lava:target_reached",),
+            )
+        return RewardOutcome()
 
 
 class BuriedEscape(Task):
@@ -213,14 +279,14 @@ class BuriedEscape(Task):
         return spec
 
     def on_reset(self, world, rng: np.random.Generator):
-        world.teleport(0.5, 5.0, 0.5)
+        teleport_meters(world, (0.5, 5.0, 0.5))
         # trigger: remove the support layer -> both sand layers cascade
         for x in range(-1, 2):
             for z in range(-1, 2):
-                world.set_block(x, 6, z, 0)
+                metric_set_block(world, (x, 6, z), 0)
 
-    def step_reward(self, world):
-        return self.reach_reward(world, self.PAD)
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
+        return self.reach_outcome(world, self.PAD, events=events)
 
 
 class CircuitDoor(Task):
@@ -259,11 +325,27 @@ class CircuitDoor(Task):
         spec.append(_reg(int(self.target[0]), 5, 0, int(self.target[0]), 5, 0, ids.TORCH))
         return spec
 
-    def on_reset(self, world, rng: np.random.Generator):
-        world.teleport(5.5, 5.0, 0.5)
+    def semantic_regions(self, rng: np.random.Generator):
+        """Describe the complete door circuit as one stable structure.
 
-    def step_reward(self, world):
-        return self.reach_reward(world, self.target)
+        Individual wall, switch, wire, door, and target regions retain
+        stable IDs while sharing a structure ID, which lets the scene graph
+        represent composition instead of treating every overlay as an
+        unrelated object.
+        """
+
+        structure_id = 0xC1_0002 if self.two else 0xC1_0001
+        region_base = structure_id << 16
+        return [
+            (region_base + index + 1, structure_id, *region)
+            for index, region in enumerate(self.scenario(rng))
+        ]
+
+    def on_reset(self, world, rng: np.random.Generator):
+        teleport_meters(world, (5.5, 5.0, 0.5))
+
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
+        return self.reach_outcome(world, self.target, events=events)
 
 
 class FirebreakJudge(Task):
@@ -300,26 +382,37 @@ class FirebreakJudge(Task):
         clone = _branch_sim(world, None, ticks=400)
         remaining = sum(
             1 for y in (6, 7, 8)
-            if clone.get_block(self.wall_x, y, 0) & 0xFFF == ids.PLANKS
+            if metric_any_block_is(clone, (self.wall_x, y, 0), ids.PLANKS)
         )
         return remaining < 3
 
     def on_reset(self, world, rng: np.random.Generator):
         self.burns = self._truth(world)
         self._done = False
-        world.teleport(-8.5, 6.0, 0.5)
+        teleport_meters(world, (-8.5, 6.0, 0.5))
 
-    def step_reward(self, world):
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
         if self._done:
-            return 0.0, False
-        x, y, z = world.agent_pos()
+            return RewardOutcome()
+        x, y, z = agent_position_meters(world)
         on_burns = abs(x - (-4.5)) <= 1.5 and abs(z - (-2.5)) <= 1.5
         on_survives = abs(x - (-4.5)) <= 1.5 and abs(z - 3.5) <= 1.5
         if not (on_burns or on_survives):
-            return 0.0, False
-        self._done = True
+            return RewardOutcome()
         correct = on_burns == self.burns
-        return (1.0 if correct else 0.0), True
+        reward = 1.0 if correct else 0.0
+        answer = "burns" if on_burns else "survives"
+        return RewardOutcome(
+            total=reward,
+            components={"correctness": reward},
+            terminated=True,
+            termination_reason="correct_answer" if correct else "incorrect_answer",
+            evidence_event_ids=evidence_event_ids(
+                events, kinds=("agent_moved",)
+            ),
+            evidence_labels=(f"task:firebreak_judge:answer:{answer}",),
+            task_state_updates={"_done": True},
+        )
 
 
 class PlateDoor(Task):
@@ -351,10 +444,10 @@ class PlateDoor(Task):
         return spec
 
     def on_reset(self, world, rng: np.random.Generator):
-        world.teleport(5.5, 5.0, 0.5)
+        teleport_meters(world, (5.5, 5.0, 0.5))
 
-    def step_reward(self, world):
-        return self.reach_reward(world, self.TARGET)
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
+        return self.reach_outcome(world, self.TARGET, events=events)
 
 
 class TntClear(Task):
@@ -382,10 +475,10 @@ class TntClear(Task):
         return spec
 
     def on_reset(self, world, rng: np.random.Generator):
-        world.teleport(4.5, 5.0, 0.5)
+        teleport_meters(world, (4.5, 5.0, 0.5))
 
-    def step_reward(self, world):
-        return self.reach_reward(world, self.TARGET)
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
+        return self.reach_outcome(world, self.TARGET, events=events)
 
 
 class LogicProbe(Task):
@@ -468,7 +561,7 @@ class LogicProbe(Task):
         return spec
 
     def _lamp(self, world) -> int:
-        return (world.get_block(*self.lamp) >> 12) & 1
+        return (metric_get_block(world, self.lamp) >> 12) & 1
 
     def on_reset(self, world, rng: np.random.Generator):
         self.goal = int(rng.integers(2))
@@ -476,15 +569,26 @@ class LogicProbe(Task):
         # lever states already satisfy the sampled goal, flip the goal
         if self._lamp(_branch_sim(world, None, ticks=8)) == self.goal:
             self.goal = 1 - self.goal
-        world.teleport(-4.5, 5.0, 1.5)
+        teleport_meters(world, (-4.5, 5.0, 1.5))
 
-    def step_reward(self, world):
+    def reward_outcome(self, world, events=()) -> RewardOutcome:
         # ignore the settle transient (torches self-correct on tick 1-2)
         if world.tick() < 8:
-            return 0.0, False
+            return RewardOutcome()
         if self._lamp(world) == self.goal:
-            return 1.0, True
-        return 0.0, False
+            return RewardOutcome(
+                total=1.0,
+                components={"success": 1.0},
+                terminated=True,
+                termination_reason="goal_state_reached",
+                evidence_event_ids=evidence_event_ids(
+                    events,
+                    kinds=("circuit_changed", "state_changed"),
+                    locations=set(metric_cell_volume(world, self.lamp)),
+                ),
+                evidence_labels=("task:logic_probe:lamp_goal_state",),
+            )
+        return RewardOutcome()
 
 
 PROBE_TASKS = ["collapse_judge", "water_routing", "bridge_over_lava", "buried_escape",

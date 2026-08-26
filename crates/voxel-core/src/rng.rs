@@ -56,9 +56,13 @@ impl Rng {
 /// chunk never depends on how many other chunks were generated before it.
 pub fn hash2(seed: u64, x: i32, z: i32) -> u64 {
     let mut h = seed ^ 0x9E37_79B9_7F4A_7C15;
-    h = h.wrapping_add(x as i64 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h = h
+        .wrapping_add(x as i64 as u64)
+        .wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 29;
-    h = h.wrapping_add(z as i64 as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+    h = h
+        .wrapping_add(z as i64 as u64)
+        .wrapping_mul(0x94D0_49BB_1331_11EB);
     h ^= h >> 32;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     h ^ (h >> 31)
@@ -68,11 +72,17 @@ pub fn hash2(seed: u64, x: i32, z: i32) -> u64 {
 /// decisions that must not consume the sequential RNG stream.
 pub fn hash_pos(seed: u64, x: i32, y: i32, z: i32, salt: u64) -> u64 {
     let mut h = seed ^ 0x243F_6A88_85A3_08D3;
-    h = h.wrapping_add(x as i64 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h = h
+        .wrapping_add(x as i64 as u64)
+        .wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 29;
-    h = h.wrapping_add(y as i64 as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+    h = h
+        .wrapping_add(y as i64 as u64)
+        .wrapping_mul(0x94D0_49BB_1331_11EB);
     h ^= h >> 32;
-    h = h.wrapping_add(z as i64 as u64).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h = h
+        .wrapping_add(z as i64 as u64)
+        .wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     h ^= h >> 29;
     h = h.wrapping_add(salt).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     h ^ (h >> 31)

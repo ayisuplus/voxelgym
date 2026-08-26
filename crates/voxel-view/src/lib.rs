@@ -34,28 +34,52 @@ pub(crate) struct ChunkGrid<'w> {
     oz: i32,
     side: usize,
     top: i32,
+    scale: f64,
+    max_dist_cells: f64,
 }
 
 impl<'w> ChunkGrid<'w> {
     pub(crate) fn new(world: &'w mut World, origin: [f64; 3]) -> Self {
+        Self::with_max_distance_meters(world, origin, (RENDER_RADIUS_CHUNKS * 16) as f64)
+    }
+
+    pub(crate) fn with_max_distance_meters(
+        world: &'w mut World,
+        origin: [f64; 3],
+        requested_meters: f64,
+    ) -> Self {
         let ecx = (origin[0].floor() as i32).div_euclid(16);
         let ecz = (origin[2].floor() as i32).div_euclid(16);
+        let scale = world.scale();
+        let physical_horizon = requested_meters
+            .max(0.0)
+            .min((RENDER_RADIUS_CHUNKS * 16) as f64);
+        let max_dist_cells = physical_horizon * scale;
+        let radius_chunks = (max_dist_cells / 16.0).ceil() as i32;
         // pre-generate the radius so ray reads never trigger generation
         // mid-pass (and to bound ray cost)
-        for cx in ecx - RENDER_RADIUS_CHUNKS..=ecx + RENDER_RADIUS_CHUNKS {
-            for cz in ecz - RENDER_RADIUS_CHUNKS..=ecz + RENDER_RADIUS_CHUNKS {
+        for cx in ecx - radius_chunks..=ecx + radius_chunks {
+            for cz in ecz - radius_chunks..=ecz + radius_chunks {
                 world.ensure_chunk(cx, cz);
             }
         }
-        let side = (2 * RENDER_RADIUS_CHUNKS + 1) as usize;
-        let (ox, oz) = (ecx - RENDER_RADIUS_CHUNKS, ecz - RENDER_RADIUS_CHUNKS);
+        let side = (2 * radius_chunks + 1) as usize;
+        let (ox, oz) = (ecx - radius_chunks, ecz - radius_chunks);
         let mut grid: Vec<Option<&voxel_core::Chunk>> = vec![None; side * side];
-        for cz in oz..=ecz + RENDER_RADIUS_CHUNKS {
-            for cx in ox..=ecx + RENDER_RADIUS_CHUNKS {
+        for cz in oz..=ecz + radius_chunks {
+            for cx in ox..=ecx + radius_chunks {
                 grid[(cz - oz) as usize * side + (cx - ox) as usize] = world.chunks.get(&(cx, cz));
             }
         }
-        ChunkGrid { grid, ox, oz, side, top: world.height() }
+        ChunkGrid {
+            grid,
+            ox,
+            oz,
+            side,
+            top: world.height(),
+            scale,
+            max_dist_cells,
+        }
     }
 
     #[inline]
@@ -72,14 +96,22 @@ impl<'w> ChunkGrid<'w> {
             return AIR;
         }
         match self.grid[(gz as usize) * self.side + gx as usize] {
-            Some(c) => c.get(x.rem_euclid(16) as usize, y as usize, z.rem_euclid(16) as usize),
+            Some(c) => c.get(
+                x.rem_euclid(16) as usize,
+                y as usize,
+                z.rem_euclid(16) as usize,
+            ),
             None => AIR,
         }
     }
 
-    /// Max ray distance the grid covers.
-    pub(crate) fn max_dist(&self) -> f64 {
-        (RENDER_RADIUS_CHUNKS * 16) as f64
+    /// Max ray distance the grid covers in cell units for DDA traversal.
+    pub(crate) const fn max_dist_cells(&self) -> f64 {
+        self.max_dist_cells
+    }
+
+    pub(crate) const fn scale(&self) -> f64 {
+        self.scale
     }
 }
 
@@ -98,7 +130,7 @@ pub struct Frame {
     pub height: usize,
     /// RGB u8, row-major, 3 channels.
     pub rgb: Vec<u8>,
-    /// Depth in cells (ray parameter t), f32.
+    /// Depth in meters (ray parameter t), f32.
     pub depth: Vec<f32>,
     /// Block id per pixel; SKY_SEG on miss.
     pub seg: Vec<u16>,
@@ -157,7 +189,9 @@ pub fn render_from(
     fov_deg: f64,
 ) -> Frame {
     let grid = ChunkGrid::new(world, eye);
-    let max_dist = grid.max_dist();
+    let max_dist_cells = grid.max_dist_cells();
+    let scale = grid.scale();
+    let max_dist_meters = max_dist_cells / scale;
     let (fwd, right, up) = camera_rays(yaw_deg, pitch_deg);
     let half = (fov_deg / 2.0).to_radians().tan();
 
@@ -183,7 +217,7 @@ pub fn render_from(
                 ];
                 let dl = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
                 dir = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
-                let hit = dda(eye, dir, max_dist, |x, y, z| grid.get(x, y, z));
+                let hit = dda(eye, dir, max_dist_cells, |x, y, z| grid.get(x, y, z));
                 match hit {
                     Some(h) => {
                         let base = block_def(cell_id(h.cell)).color;
@@ -191,7 +225,7 @@ pub fn render_from(
                         rgb_row[px * 3] = (base[0] as f64 * shade) as u8;
                         rgb_row[px * 3 + 1] = (base[1] as f64 * shade) as u8;
                         rgb_row[px * 3 + 2] = (base[2] as f64 * shade) as u8;
-                        dep_row[px] = (h.dist * dl) as f32; // cells along the unit ray
+                        dep_row[px] = (h.dist * dl / scale) as f32;
                         seg_row[px] = cell_id(h.cell);
                         nrm_row[px * 3] = h.face[0] as f32;
                         nrm_row[px * 3 + 1] = h.face[1] as f32;
@@ -201,7 +235,7 @@ pub fn render_from(
                         rgb_row[px * 3] = SKY_COLOR[0];
                         rgb_row[px * 3 + 1] = SKY_COLOR[1];
                         rgb_row[px * 3 + 2] = SKY_COLOR[2];
-                        dep_row[px] = max_dist as f32;
+                        dep_row[px] = max_dist_meters as f32;
                         seg_row[px] = SKY_SEG;
                         // normals stay [0,0,0] on miss
                     }
@@ -253,7 +287,14 @@ mod tests {
         let eye = w.agent.eye();
         let (fwd, right, up) = camera_rays(0.0, 45.0);
         let half = (45.0f64).to_radians().tan();
-        for (px, py) in [(64, 100), (10, 80), (120, 70), (64, 120), (0, 64), (127, 127)] {
+        for (px, py) in [
+            (64, 100),
+            (10, 80),
+            (120, 70),
+            (64, 120),
+            (0, 64),
+            (127, 127),
+        ] {
             let sy = 1.0 - 2.0 * (py as f64 + 0.5) / 128.0;
             let sx = 2.0 * (px as f64 + 0.5) / 128.0 - 1.0;
             let mut dir = [
@@ -265,7 +306,11 @@ mod tests {
             dir = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
             let h = dda(eye, dir, 96.0, |x, y, z| w.peek_block(x, y, z)).expect("ground hit");
             let expected = (h.dist * dl) as f32;
-            assert_eq!(f.depth[py * 128 + px], expected, "depth bitwise (px={px},py={py})");
+            assert_eq!(
+                f.depth[py * 128 + px],
+                expected,
+                "depth bitwise (px={px},py={py})"
+            );
             assert_eq!(f.seg[py * 128 + px], GRASS_BLOCK);
         }
     }
@@ -288,7 +333,11 @@ mod tests {
         assert!(stone_px > 50, "pillar visible: {stone_px} px");
         // depths on stone pixels should be a few cells (face at 3.5)
         let i = f.seg.iter().position(|&s| s == STONE).unwrap();
-        assert!((3.0..=6.0).contains(&f.depth[i]), "depth {} in range", f.depth[i]);
+        assert!(
+            (3.0..=6.0).contains(&f.depth[i]),
+            "depth {} in range",
+            f.depth[i]
+        );
     }
 
     #[test]
@@ -300,8 +349,7 @@ mod tests {
 
         let (forward, right, up) = camera_rays(37.0, 90.0);
         for axis in [forward, right, up] {
-            let length =
-                (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
             assert!((length - 1.0).abs() < 1e-12);
         }
         for (a, b) in [(forward, right), (forward, up), (right, up)] {
@@ -336,8 +384,10 @@ mod tests {
         assert_eq!(from_pose.normals.len(), 3 * 2 * 3);
         assert!(from_pose
             .rgb
-            .chunks_exact(3)
-            .all(|pixel| pixel == SKY_COLOR));
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == SKY_COLOR));
         assert!(from_pose.depth.iter().all(|&depth| depth == 96.0));
         assert!(from_pose.seg.iter().all(|&segment| segment == SKY_SEG));
         assert!(from_pose.normals.iter().all(|&normal| normal == 0.0));
