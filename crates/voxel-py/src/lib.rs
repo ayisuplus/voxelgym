@@ -11,6 +11,57 @@ use voxel_core::worldgen::{Preset, Region, ScenarioSpec};
 use voxel_core::World;
 
 type ActionTuple = (u8, u8, u8, u8, u8, u8, u8, u8, u8, u8);
+type RenderOutput<'py> = (
+    Bound<'py, PyArray3<u8>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray2<u16>>,
+    Bound<'py, PyArray3<f32>>,
+);
+
+fn validate_render_dimensions(width: usize, height: usize) -> PyResult<()> {
+    if width == 0 || height == 0 {
+        return Err(PyValueError::new_err(format!(
+            "render dimensions must be positive, got {width}x{height}"
+        )));
+    }
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "render dimensions are too large, got {width}x{height}"
+            ))
+        })?;
+    Ok(())
+}
+
+fn frame_to_numpy<'py>(py: Python<'py>, frame: voxel_view::Frame) -> PyResult<RenderOutput<'py>> {
+    let voxel_view::Frame {
+        width,
+        height,
+        rgb,
+        depth,
+        seg,
+        normals,
+    } = frame;
+    validate_render_dimensions(width, height)?;
+
+    let rgb = ndarray::Array3::from_shape_vec((height, width, 3), rgb)
+        .map_err(|err| PyValueError::new_err(format!("invalid RGB frame: {err}")))?;
+    let depth = ndarray::Array2::from_shape_vec((height, width), depth)
+        .map_err(|err| PyValueError::new_err(format!("invalid depth frame: {err}")))?;
+    let seg = ndarray::Array2::from_shape_vec((height, width), seg)
+        .map_err(|err| PyValueError::new_err(format!("invalid segmentation frame: {err}")))?;
+    let normals = ndarray::Array3::from_shape_vec((height, width, 3), normals)
+        .map_err(|err| PyValueError::new_err(format!("invalid normals frame: {err}")))?;
+
+    Ok((
+        PyArray3::from_owned_array(py, rgb),
+        PyArray2::from_owned_array(py, depth),
+        PyArray2::from_owned_array(py, seg),
+        PyArray3::from_owned_array(py, normals),
+    ))
+}
 
 fn to_action(t: &ActionTuple) -> Action {
     Action::from_parts(&[t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9])
@@ -267,26 +318,9 @@ impl PyWorld {
     /// Render the agent view: (rgb (128,128,3) u8, depth (128,128) f32 cells,
     /// seg (128,128) u16 block ids, normals (128,128,3) f32 unit axis,
     /// [0,0,0] on sky miss). SKY_SEG=0xFFFF on miss.
-    fn render<'py>(
-        &mut self,
-        py: Python<'py>,
-    ) -> (
-        Bound<'py, numpy::PyArray3<u8>>,
-        Bound<'py, numpy::PyArray2<f32>>,
-        Bound<'py, numpy::PyArray2<u16>>,
-        Bound<'py, numpy::PyArray3<f32>>,
-    ) {
+    fn render<'py>(&mut self, py: Python<'py>) -> PyResult<RenderOutput<'py>> {
         let f = py.allow_threads(|| voxel_view::render(&mut self.world, 128, 128, 90.0));
-        let rgb = ndarray::Array3::from_shape_vec((128, 128, 3), f.rgb).unwrap();
-        let depth = ndarray::Array2::from_shape_vec((128, 128), f.depth).unwrap();
-        let seg = ndarray::Array2::from_shape_vec((128, 128), f.seg).unwrap();
-        let nrm = ndarray::Array3::from_shape_vec((128, 128, 3), f.normals).unwrap();
-        (
-            numpy::PyArray3::from_owned_array(py, rgb),
-            numpy::PyArray2::from_owned_array(py, depth),
-            numpy::PyArray2::from_owned_array(py, seg),
-            numpy::PyArray3::from_owned_array(py, nrm),
-        )
+        frame_to_numpy(py, f)
     }
 
     /// Free camera render: (origin, yaw_deg, pitch_deg). Positive pitch
@@ -301,12 +335,8 @@ impl PyWorld {
         width: usize,
         height: usize,
         fov_deg: f64,
-    ) -> (
-        Bound<'py, numpy::PyArray3<u8>>,
-        Bound<'py, numpy::PyArray2<f32>>,
-        Bound<'py, numpy::PyArray2<u16>>,
-        Bound<'py, numpy::PyArray3<f32>>,
-    ) {
+    ) -> PyResult<RenderOutput<'py>> {
+        validate_render_dimensions(width, height)?;
         let f = py.allow_threads(|| {
             voxel_view::render_from(
                 &mut self.world,
@@ -318,16 +348,7 @@ impl PyWorld {
                 fov_deg,
             )
         });
-        let rgb = ndarray::Array3::from_shape_vec((width, height, 3), f.rgb).unwrap();
-        let depth = ndarray::Array2::from_shape_vec((width, height), f.depth).unwrap();
-        let seg = ndarray::Array2::from_shape_vec((width, height), f.seg).unwrap();
-        let nrm = ndarray::Array3::from_shape_vec((width, height, 3), f.normals).unwrap();
-        (
-            numpy::PyArray3::from_owned_array(py, rgb),
-            numpy::PyArray2::from_owned_array(py, depth),
-            numpy::PyArray2::from_owned_array(py, seg),
-            numpy::PyArray3::from_owned_array(py, nrm),
-        )
+        frame_to_numpy(py, f)
     }
 
     /// Block-id -> [r,g,b] palette (row i = block id i; SKY_SEG 0xFFFF is
