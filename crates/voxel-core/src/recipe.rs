@@ -232,6 +232,7 @@ pub fn tick_furnaces(world: &mut World) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::worldgen::Preset;

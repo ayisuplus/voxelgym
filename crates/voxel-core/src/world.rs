@@ -999,6 +999,7 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -1141,5 +1142,200 @@ mod tests {
             assert_eq!(restored.hash(), original.hash());
         }
         assert_eq!(restored.agent.hp, original.agent.hp);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_extended_simulation_state() {
+        let scenario = vec![(
+            crate::worldgen::Region::new(-1, 3, -1, 1, 3, 1),
+            make_cell(WATER, 2),
+        )];
+        let mut world = World::new_scaled(99, Preset::Void, scenario, 2.0);
+        world.tick = 41;
+        world.agent.pos = [2.5, 12.0, -3.5];
+        world.agent.vel = [0.1, -0.2, 0.3];
+        world.agent.yaw = 135.0;
+        world.agent.pitch = -20.0;
+        world.agent.on_ground = true;
+        world.agent.hp = 13;
+        world.agent.fall_distance = 2.25;
+        world.agent.inventory.add(LOG, 3);
+        world.agent.selected = 4;
+        world.agent.suffocation_timer = 7;
+        world.agent.lava_timer = 8;
+        world.agent.fire_timer = 9;
+        world.mining = Some(MiningState {
+            target: (-2, 5, 7),
+            progress: 0.75,
+        });
+        world.place_cooldown = 2;
+        world.spawn_item(DIRT, 6, [4.5, 9.0, -1.5]);
+        world.items[0].age = 123;
+        world.furnaces.insert(
+            (3, 4, 5),
+            FurnaceState {
+                remaining: 17,
+                out_ready: false,
+                fuel_left: 2,
+            },
+        );
+        world.falling.push(FallingBlock {
+            id: 8,
+            block: GRAVEL,
+            pos: [8.5, 30.5, 8.5],
+            vel: [0.0, -0.4, 0.0],
+            fall_dist: 4.0,
+        });
+        world.scheduled_falls.push((-5, 8, 2, 44));
+        world.scheduled_set.insert((-5, 8, 2));
+        world.set_block(7, 6, 7, PRESSURE_PLATE);
+        world.active_fire.insert((8, 6, 7));
+        world.tnt_cells.insert((9, 6, 7));
+        world.pending_booms.push((9, 6, 7, 50));
+        world.next_falling_id = 9;
+        world.last_swap = Some(LOG);
+
+        let bytes = world.snapshot();
+        let restored = World::restore(&bytes).unwrap();
+
+        assert_eq!(restored.snapshot(), bytes);
+        assert_eq!(restored.hash(), world.hash());
+        assert_eq!(restored.mining, world.mining);
+        assert!(restored.scheduled_set.contains(&(-5, 8, 2)));
+        assert_eq!(restored.plate_count, 1);
+        assert!(restored.dirty.is_empty());
+        assert!(restored.events.is_empty());
+        assert_eq!(restored.last_swap, None);
+    }
+
+    #[test]
+    fn restore_reports_malformed_snapshot_classes() {
+        const PRESET_OFFSET: usize = 4 + 4 + 8 + 8;
+
+        let valid = World::new(5, Preset::Void, Vec::new()).snapshot();
+        let mut bad_magic = valid.clone();
+        bad_magic[..4].copy_from_slice(b"NOPE");
+        let mut old_version = valid.clone();
+        old_version[4..8].copy_from_slice(&4u32.to_le_bytes());
+        let mut future_version = valid.clone();
+        future_version[4..8].copy_from_slice(&8u32.to_le_bytes());
+        let mut bad_preset = valid.clone();
+        bad_preset[PRESET_OFFSET] = u8::MAX;
+        let truncated = valid[..valid.len() - 1].to_vec();
+
+        for (bytes, expected) in [
+            (Vec::new(), "snapshot truncated"),
+            (bad_magic, "bad magic"),
+            (old_version, "unsupported snapshot version 4"),
+            (future_version, "unsupported snapshot version 8"),
+            (bad_preset, "bad preset"),
+            (truncated, "snapshot truncated"),
+        ] {
+            assert_eq!(World::restore(&bytes).err().as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn read_only_peek_does_not_generate_a_chunk() {
+        let mut world = World::new(3, Preset::Flat, Vec::new());
+        let loaded = world.chunks.len();
+
+        assert_eq!(world.peek_block(160, 0, -160), AIR);
+        assert_eq!(world.chunks.len(), loaded);
+        assert_eq!(world.get_block(160, 0, -160), BEDROCK);
+        assert_eq!(world.chunks.len(), loaded + 1);
+    }
+
+    #[test]
+    fn voxel_window_is_axis_ordered_and_fills_vertical_bounds() {
+        let mut world = World::new(4, Preset::Void, Vec::new());
+        world.agent.pos = [0.5, 10.0, 0.5];
+        world.set_block(-10, 7, -10, STONE);
+        world.set_block(0, 11, 0, DIRT);
+        world.set_block(10, 17, 10, LOG);
+
+        let window = world.voxel_window();
+
+        assert_eq!(window.len(), 21 * 11 * 21);
+        assert_eq!(window[0], STONE);
+        assert_eq!(window[10 * 11 * 21 + 4 * 21 + 10], DIRT);
+        assert_eq!(window[window.len() - 1], LOG);
+
+        world.agent.pos[1] = -1.0;
+        let below_ground = world.voxel_window();
+        for dx in 0..21 {
+            let column = dx * 11 * 21;
+            assert!(below_ground[column..column + 4 * 21]
+                .iter()
+                .all(|&cell| cell == BEDROCK));
+        }
+
+        let top = world.height() - 1;
+        world.set_block(0, top, 0, STONE);
+        world.agent.pos[1] = world.height() as f64;
+        let above_world = world.voxel_window();
+        let center_column = 10 * 11 * 21;
+        assert_eq!(above_world[center_column + 2 * 21 + 10], STONE);
+        assert_eq!(above_world[center_column + 3 * 21 + 10], AIR);
+        for dx in 0..21 {
+            let column = dx * 11 * 21;
+            assert!(above_world[column + 3 * 21..column + 11 * 21]
+                .iter()
+                .all(|&cell| cell == AIR));
+        }
+    }
+
+    #[test]
+    fn block_queries_honor_collision_and_ordering_contracts() {
+        let mut world = World::new(6, Preset::Void, Vec::new());
+        world.set_block(2, 3, 2, STONE);
+        world.set_block(2, 8, 2, make_cell(DOOR, 1));
+        world.set_block(3, 8, 2, DOOR);
+        assert_eq!(world.surface_y(2, 2), 3);
+        assert_eq!(world.surface_y(3, 2), 8);
+        assert_eq!(world.surface_y(4, 2), -1);
+
+        for &(x, y, z) in &[(0, 6, 0), (-1, 4, 0), (-1, 5, -1), (-2, 7, 0)] {
+            world.set_block(x, y, z, DIAMOND_ORE);
+        }
+        assert_eq!(
+            world.find_blocks(DIAMOND_ORE, -1, 5, 0, 2),
+            vec![(-2, 7, 0), (-1, 5, -1), (-1, 4, 0), (0, 6, 0)]
+        );
+        assert_eq!(
+            world.find_blocks(DIAMOND_ORE, -1, 5, -1, -10),
+            vec![(-1, 5, -1)]
+        );
+        assert!(world
+            .find_blocks(DIAMOND_ORE, 0, -20, 0, 2)
+            .is_empty());
+    }
+
+    #[test]
+    fn hotbar_swap_covers_selected_hotbar_inventory_and_missing_items() {
+        let mut world = World::new(8, Preset::Void, Vec::new());
+        world.agent.selected = 2;
+        world.agent.inventory.slots[2] = crate::inventory::Stack {
+            item: DIRT,
+            count: 1,
+        };
+        world.agent.inventory.slots[5] = crate::inventory::Stack {
+            item: STONE,
+            count: 2,
+        };
+        world.agent.inventory.slots[10] = crate::inventory::Stack {
+            item: LOG,
+            count: 3,
+        };
+
+        assert_eq!(world.swap_to_hotbar(DIRT), 2);
+        assert_eq!(world.last_swap, None);
+        assert_eq!(world.swap_to_hotbar(STONE), 5);
+        assert_eq!(world.agent.selected, 5);
+        assert_eq!(world.last_swap, Some(STONE));
+        assert_eq!(world.swap_to_hotbar(LOG), 5);
+        assert_eq!(world.agent.inventory.slots[5].item, LOG);
+        assert_eq!(world.agent.inventory.slots[10].item, STONE);
+        assert_eq!(world.swap_to_hotbar(ITEM_DIAMOND), -1);
     }
 }

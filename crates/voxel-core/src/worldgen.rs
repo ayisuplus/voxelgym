@@ -413,6 +413,7 @@ pub fn apply_scenario(chunk: &mut Chunk, cx: i32, cz: i32, scenario: &ScenarioSp
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -568,6 +569,7 @@ mod tests {
 
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod scale_tests {
     use super::*;
     use crate::world::World;

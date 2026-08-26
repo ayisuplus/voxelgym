@@ -61,3 +61,66 @@ pub fn use_block(world: &mut World, x: i32, y: i32, z: i32, id: u16) {
 pub fn craft(world: &mut World, recipe: u8) {
     crate::recipe::craft(world, recipe);
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::item::DESPAWN_TICKS;
+    use crate::worldgen::Preset;
+
+    #[test]
+    fn breaking_blocks_enforces_tool_drops_and_always_emits_events() {
+        let mut world = World::new(1, Preset::Void, Vec::new());
+
+        block_broken(&mut world, 2, 3, 4, STONE, false);
+        assert!(world.items.is_empty());
+        assert_eq!(
+            world.drain_events(),
+            vec![Event::BlockMined { id: STONE }]
+        );
+
+        block_broken(&mut world, -2, 3, -4, STONE, true);
+        assert_eq!(world.items.len(), 1);
+        assert_eq!(world.items[0].item, COBBLESTONE);
+        assert_eq!(world.items[0].count, 1);
+        assert_eq!(world.items[0].pos, [-1.5, 3.5, -3.5]);
+        assert_eq!(
+            world.drain_events(),
+            vec![Event::BlockMined { id: STONE }]
+        );
+    }
+
+    #[test]
+    fn use_and_craft_dispatch_to_recipe_systems() {
+        let mut world = World::new(2, Preset::Void, Vec::new());
+        world.agent.inventory.add(LOG, 1);
+
+        craft(&mut world, 1);
+        assert_eq!(world.agent.inventory.count(LOG), 0);
+        assert_eq!(world.agent.inventory.count(PLANKS), 4);
+
+        world.agent.inventory.add(IRON_ORE, 1);
+        world.agent.inventory.add(ITEM_COAL, 1);
+        use_block(&mut world, 8, 9, 10, DIRT);
+        assert!(world.furnaces.is_empty());
+        use_block(&mut world, 8, 9, 10, FURNACE);
+        assert_eq!(
+            world.furnaces[&(8, 9, 10)].remaining,
+            crate::recipe::SMELT_TICKS
+        );
+    }
+
+    #[test]
+    fn after_entities_consumes_dirty_input_and_despawns_expired_items() {
+        let mut world = World::new(3, Preset::Void, Vec::new());
+        world.dirty.push((30, 30, 30));
+        world.spawn_item(DIRT, 1, [0.5, 10.0, 0.5]);
+        world.items[0].age = DESPAWN_TICKS;
+
+        after_entities(&mut world);
+
+        assert!(world.dirty.is_empty());
+        assert!(world.items.is_empty());
+    }
+}

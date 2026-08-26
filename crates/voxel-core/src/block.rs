@@ -243,6 +243,7 @@ pub fn blocks_ray(cell: u16) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::collections::HashSet;

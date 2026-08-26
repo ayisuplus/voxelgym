@@ -451,6 +451,17 @@ pub struct PyWorldBatch {
 }
 
 impl PyWorldBatch {
+    fn validate_action_count(&self, count: usize) -> PyResult<()> {
+        if count == self.worlds.len() {
+            Ok(())
+        } else {
+            Err(PyValueError::new_err(format!(
+                "expected {} actions, got {count}",
+                self.worlds.len()
+            )))
+        }
+    }
+
     /// Parallel step over all worlds (GIL released); per-world dead flags.
     fn step_actions(&mut self, py: Python<'_>, acts: Vec<Action>) -> Vec<bool> {
         py.allow_threads(|| {
@@ -483,9 +494,10 @@ impl PyWorldBatch {
     }
 
     /// Step every world once. Returns per-world dead flags.
-    fn step_batch(&mut self, py: Python<'_>, actions: Vec<ActionTuple>) -> Vec<bool> {
+    fn step_batch(&mut self, py: Python<'_>, actions: Vec<ActionTuple>) -> PyResult<Vec<bool>> {
+        self.validate_action_count(actions.len())?;
         let acts: Vec<Action> = actions.iter().map(to_action).collect();
-        self.step_actions(py, acts)
+        Ok(self.step_actions(py, acts))
     }
 
     /// Same as step_batch but takes a contiguous (N, 10) uint8 numpy array —
@@ -497,8 +509,11 @@ impl PyWorldBatch {
         actions: numpy::PyReadonlyArray2<'py, u8>,
     ) -> PyResult<Vec<bool>> {
         let arr = actions.as_array();
-        if arr.ndim() != 2 || arr.ncols() != 10 {
-            return Err(PyValueError::new_err("actions must have shape (N, 10)"));
+        if arr.ndim() != 2 || arr.nrows() != self.worlds.len() || arr.ncols() != 10 {
+            return Err(PyValueError::new_err(format!(
+                "actions must have shape ({}, 10)",
+                self.worlds.len()
+            )));
         }
         let mut acts = Vec::with_capacity(arr.nrows());
         for row in arr.rows() {

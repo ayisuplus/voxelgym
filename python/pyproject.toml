@@ -14,10 +14,21 @@ dependencies = ["gymnasium", "numpy", "pyarrow"]
 # everything the README quickstart lists beyond the runtime deps, plus the
 # web demo; install with: pip install -e python[dev]
 dev = [
+    "coverage",
     "maturin",
     "pytest",
+    "pytest-cov",
     "fastapi",
+    "httpx",
     "uvicorn[standard]",
+]
+ml = [
+    "torch",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "ml: tests that require the optional CPU PyTorch dependency",
 ]
 
 [tool.setuptools.packages.find]

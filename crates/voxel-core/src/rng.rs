@@ -79,6 +79,7 @@ pub fn hash_pos(seed: u64, x: i32, y: i32, z: i32, salt: u64) -> u64 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

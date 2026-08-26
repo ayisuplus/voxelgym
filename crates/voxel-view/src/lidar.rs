@@ -89,7 +89,8 @@ fn beam_noise(cfg: &LidarConfig, frame_idx: u64, beam: usize) -> (f64, f64) {
 }
 
 /// Full scan from `origin` (typically the agent eye, but any pose works —
-/// a fixed emitter block is just a constant origin/yaw).
+/// a fixed emitter block is just a constant origin/yaw). A zero channel or
+/// azimuth count returns an empty scan with the requested dimensions.
 pub fn scan(
     world: &mut World,
     cfg: &LidarConfig,
@@ -104,6 +105,16 @@ pub fn scan(
     let mut range = vec![0f32; c_n * a_n];
     let mut intensity = vec![0f32; c_n * a_n];
     let mut seg = vec![SKY_SEG; c_n * a_n];
+
+    if c_n == 0 || a_n == 0 {
+        return Scan {
+            channels: c_n,
+            azimuth_steps: a_n,
+            range,
+            intensity,
+            seg,
+        };
+    }
 
     range
         .par_chunks_mut(a_n)
@@ -158,6 +169,7 @@ pub fn scan(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use voxel_core::worldgen::Preset;
@@ -256,5 +268,82 @@ mod tests {
         // DDA ray parameter = euclidean distance for unit dirs
         let exact = 4.5 / 5f64.to_radians().cos();
         assert!((s.range[0] as f64 - exact).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beam_directions_follow_minecraft_cardinals_and_elevation() {
+        let cases = [
+            (beam_dir(0.0, 0.0, 0.0), [0.0, 0.0, 1.0]),
+            (beam_dir(90.0, 0.0, 0.0), [-1.0, 0.0, 0.0]),
+            (beam_dir(0.0, 90.0, 0.0), [-1.0, 0.0, 0.0]),
+            (beam_dir(0.0, 0.0, 90.0), [0.0, 1.0, 0.0]),
+        ];
+
+        for (actual, expected) in cases {
+            for axis in 0..3 {
+                assert!((actual[axis] - expected[axis]).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_channel_uses_the_minimum_elevation() {
+        let cfg = LidarConfig {
+            channels: 1,
+            azimuth_steps: 1,
+            min_elev_deg: -5.0,
+            max_elev_deg: 80.0,
+            ..cfg4x8()
+        };
+        let mut world = wall_world();
+
+        let scan = scan(&mut world, &cfg, [5.5, 6.5, 0.5], 270.0, 0);
+
+        assert_eq!((scan.channels, scan.azimuth_steps), (1, 1));
+        assert_eq!(scan.seg, vec![STONE]);
+        let expected = 4.5 / 5f64.to_radians().cos();
+        assert!((scan.range[0] as f64 - expected).abs() < 1e-6);
+        assert!(scan.intensity[0] > 0.0);
+    }
+
+    #[test]
+    fn maximum_range_turns_a_distant_surface_into_a_miss() {
+        let cfg = LidarConfig {
+            channels: 1,
+            azimuth_steps: 1,
+            min_elev_deg: 0.0,
+            max_elev_deg: 0.0,
+            max_range: 4.0,
+            ..cfg4x8()
+        };
+        let mut world = wall_world();
+
+        let scan = scan(&mut world, &cfg, [5.5, 6.5, 0.5], 270.0, 0);
+
+        assert_eq!(scan.range, vec![0.0]);
+        assert_eq!(scan.intensity, vec![0.0]);
+        assert_eq!(scan.seg, vec![SKY_SEG]);
+    }
+
+    #[test]
+    fn empty_dimensions_produce_an_empty_scan() {
+        let mut world = World::new(12, Preset::Void, Vec::new());
+        for (channels, azimuth_steps) in [(0, 4), (4, 0)] {
+            let cfg = LidarConfig {
+                channels,
+                azimuth_steps,
+                ..LidarConfig::default()
+            };
+
+            let scan = scan(&mut world, &cfg, [0.5, 20.0, 0.5], 0.0, 0);
+
+            assert_eq!(
+                (scan.channels, scan.azimuth_steps),
+                (channels, azimuth_steps)
+            );
+            assert!(scan.range.is_empty());
+            assert!(scan.intensity.is_empty());
+            assert!(scan.seg.is_empty());
+        }
     }
 }

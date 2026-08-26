@@ -26,6 +26,7 @@ import struct
 import sys
 import time
 from collections import deque
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
@@ -152,10 +153,6 @@ class Sim:
         }
 
 
-SIM = Sim()
-CLIENTS: set[WebSocket] = set()
-
-
 def build_packet(sim: Sim, hud: dict) -> bytes:
     w = sim.env.world
     r = sim.res
@@ -212,27 +209,28 @@ def build_packet(sim: Sim, hud: dict) -> bytes:
     return b"".join(parts)
 
 
-async def broadcast(packet: bytes):
+async def broadcast(packet: bytes, clients: set[WebSocket]):
     dead = []
-    for ws in CLIENTS:
+    # Connection handlers can mutate the shared set while send_bytes yields.
+    for ws in tuple(clients):
         try:
             await ws.send_bytes(packet)
         except Exception:
             dead.append(ws)
     for ws in dead:
-        CLIENTS.discard(ws)
+        clients.discard(ws)
 
 
-async def sim_loop():
+async def sim_loop(sim: Sim, clients: set[WebSocket]):
     frame = 1.0 / FPS
     while True:
         t0 = time.perf_counter()
         try:
-            if not SIM.paused:
-                SIM.run_frames()
-            if CLIENTS:
-                hud = SIM.hud(SIM.last_action)
-                await broadcast(build_packet(SIM, hud))
+            if not sim.paused:
+                sim.run_frames()
+            if clients:
+                hud = sim.hud(sim.last_action)
+                await broadcast(build_packet(sim, hud), clients)
         except Exception as e:
             # a demo server must never die mid-presentation: log, pause, continue
             print(f"[sim_loop] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
@@ -241,39 +239,65 @@ async def sim_loop():
         await asyncio.sleep(max(0.005, frame - dt))
 
 
-def apply_cmd(msg: dict):
+def apply_cmd(sim: Sim, msg: dict):
     cmd = msg.get("cmd")
     if cmd == "set_task":
         name = msg["task"]
         if name in task_names():
-            SIM.showcase = False
-            SIM.task_name = name
-            SIM.reset_episode(int(msg.get("seed", SIM.seed)))
+            sim.showcase = False
+            sim.task_name = name
+            sim.reset_episode(int(msg.get("seed", sim.seed)))
     elif cmd == "set_showcase":
-        SIM.showcase = bool(msg.get("on", True))
-        if SIM.showcase:
-            SIM.show_idx = 0
-            SIM.task_name = SHOWCASE[0]
-            SIM.reset_episode(SIM.seed)
+        sim.showcase = bool(msg.get("on", True))
+        if sim.showcase:
+            sim.show_idx = 0
+            sim.task_name = SHOWCASE[0]
+            sim.reset_episode(sim.seed)
     elif cmd == "set_seed":
-        SIM.reset_episode(int(msg["seed"]))
+        sim.reset_episode(int(msg["seed"]))
     elif cmd == "set_speed":
-        SIM.speed = max(1, min(500, int(msg["speed"])))
+        sim.speed = max(1, min(500, int(msg["speed"])))
     elif cmd == "pause":
-        SIM.paused = True
+        sim.paused = True
     elif cmd == "resume":
-        SIM.paused = False
+        sim.paused = False
     elif cmd == "reset":
-        SIM.reset_episode(SIM.seed)
+        sim.reset_episode(sim.seed)
     elif cmd == "set_quality":
-        SIM.res = {1: 128, 2: 256, 4: 512}.get(int(msg["q"]), 256)
+        sim.res = {1: 128, 2: 256, 4: 512}.get(int(msg["q"]), 256)
     elif cmd == "set_policy":
         if msg["policy"] in ("expert", "random"):
-            SIM.policy = msg["policy"]
+            sim.policy = msg["policy"]
 
 
-def create_app() -> FastAPI:
-    app = FastAPI()
+def create_app(*, sim: Sim | None = None, start_loop: bool = True) -> FastAPI:
+    """Build the demo application without constructing a simulator at import time.
+
+    ``sim`` is an injection seam for deterministic tests and alternate demo
+    drivers.  The default simulator and background loop are owned by the
+    application's lifespan.
+    """
+
+    @asynccontextmanager
+    async def lifespan(active_app: FastAPI):
+        active_app.state.sim = sim if sim is not None else Sim()
+        active_app.state.clients = set()
+        active_app.state.sim_task = None
+        if start_loop:
+            active_app.state.sim_task = asyncio.create_task(
+                sim_loop(active_app.state.sim, active_app.state.clients)
+            )
+        try:
+            yield
+        finally:
+            task = active_app.state.sim_task
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            active_app.state.clients.clear()
+
+    app = FastAPI(lifespan=lifespan)
 
     @app.get("/")
     async def index():
@@ -290,24 +314,22 @@ def create_app() -> FastAPI:
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
         await websocket.accept()
-        CLIENTS.add(websocket)
+        clients = app.state.clients
+        active_sim = app.state.sim
+        clients.add(websocket)
         # one-time palette for seg colorization
-        pal = SIM.env.world.palette().tolist()
+        pal = active_sim.env.world.palette().tolist()
         await websocket.send_text(json.dumps({"type": "palette", "colors": pal}))
         try:
             while True:
                 data = await websocket.receive_text()
-                apply_cmd(json.loads(data))
+                apply_cmd(active_sim, json.loads(data))
         except WebSocketDisconnect:
             pass
         finally:
-            CLIENTS.discard(websocket)
+            clients.discard(websocket)
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
-
-    @app.on_event("startup")
-    async def _start():
-        asyncio.create_task(sim_loop())
 
     return app
 

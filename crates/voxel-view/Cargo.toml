@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 voxel-core = { path = "../voxel-core" }
 rayon = "=1.10.0"
+
+[lints]
+workspace = true

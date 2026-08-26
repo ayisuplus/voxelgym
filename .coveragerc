@@ -1,0 +1,19 @@
+[run]
+branch = True
+relative_files = True
+source =
+    python/voxelgym
+    web
+
+[report]
+fail_under = 80
+precision = 1
+show_missing = True
+exclude_also =
+    if __name__ == .__main__.:
+
+[html]
+directory = coverage/python/html
+
+[xml]
+output = coverage/python/coverage.xml

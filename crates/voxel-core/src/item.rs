@@ -145,6 +145,7 @@ pub fn tick_items_logic(world: &mut World) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::block::DIRT;

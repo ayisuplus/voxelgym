@@ -1,3 +1,5 @@
+#![cfg_attr(all(test, coverage_nightly), feature(coverage_attribute))]
+
 pub mod block;
 pub mod chunk;
 pub mod circuit;

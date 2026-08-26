@@ -1,3 +1,5 @@
+#![cfg_attr(all(test, coverage_nightly), feature(coverage_attribute))]
+
 //! voxel-view: CPU DDA raycast renderer.
 //!
 //! One DDA ray per pixel through the voxel grid (strict policy: fluids
@@ -218,6 +220,7 @@ pub fn render_from(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use voxel_core::worldgen::Preset;
@@ -286,5 +289,63 @@ mod tests {
         // depths on stone pixels should be a few cells (face at 3.5)
         let i = f.seg.iter().position(|&s| s == STONE).unwrap();
         assert!((3.0..=6.0).contains(&f.depth[i]), "depth {} in range", f.depth[i]);
+    }
+
+    #[test]
+    fn camera_basis_is_canonical_and_orthonormal_at_the_poles() {
+        let (forward, right, up) = camera_rays(0.0, 0.0);
+        assert_eq!(forward, [-0.0, -0.0, 1.0]);
+        assert_eq!(right, [1.0, 0.0, 0.0]);
+        assert_eq!(up, [-0.0, 1.0, 0.0]);
+
+        let (forward, right, up) = camera_rays(37.0, 90.0);
+        for axis in [forward, right, up] {
+            let length =
+                (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            assert!((length - 1.0).abs() < 1e-12);
+        }
+        for (a, b) in [(forward, right), (forward, up), (right, up)] {
+            let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            assert!(dot.abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn face_shading_covers_every_axis_class() {
+        assert_eq!(face_shade([0, 1, 0]), 1.0);
+        assert_eq!(face_shade([0, -1, 0]), 0.5);
+        assert_eq!(face_shade([0, 0, 1]), 0.8);
+        assert_eq!(face_shade([0, 0, -1]), 0.8);
+        assert_eq!(face_shade([1, 0, 0]), 0.6);
+        assert_eq!(face_shade([-1, 0, 0]), 0.6);
+    }
+
+    #[test]
+    fn non_square_void_render_is_a_complete_sky_frame() {
+        let mut world = World::new(11, Preset::Void, Vec::new());
+        world.agent.pos = [2.5, 40.0, -1.5];
+        world.agent.yaw = 15.0;
+        world.agent.pitch = 0.0;
+        let eye = world.agent.eye();
+
+        let from_pose = render_from(&mut world, eye, 15.0, 0.0, 3, 2, 70.0);
+        assert_eq!((from_pose.width, from_pose.height), (3, 2));
+        assert_eq!(from_pose.rgb.len(), 3 * 2 * 3);
+        assert_eq!(from_pose.depth.len(), 3 * 2);
+        assert_eq!(from_pose.seg.len(), 3 * 2);
+        assert_eq!(from_pose.normals.len(), 3 * 2 * 3);
+        assert!(from_pose
+            .rgb
+            .chunks_exact(3)
+            .all(|pixel| pixel == SKY_COLOR));
+        assert!(from_pose.depth.iter().all(|&depth| depth == 96.0));
+        assert!(from_pose.seg.iter().all(|&segment| segment == SKY_SEG));
+        assert!(from_pose.normals.iter().all(|&normal| normal == 0.0));
+
+        let from_agent = render(&mut world, 3, 2, 70.0);
+        assert_eq!(from_agent.rgb, from_pose.rgb);
+        assert_eq!(from_agent.depth, from_pose.depth);
+        assert_eq!(from_agent.seg, from_pose.seg);
+        assert_eq!(from_agent.normals, from_pose.normals);
     }
 }

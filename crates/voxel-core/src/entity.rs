@@ -378,6 +378,7 @@ pub fn tick_agent(world: &mut World, input: &MoveInput) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::worldgen::Preset;

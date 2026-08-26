@@ -227,6 +227,7 @@ fn break_block(world: &mut World, x: i32, y: i32, z: i32, proper_tool: bool) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::worldgen::Preset;

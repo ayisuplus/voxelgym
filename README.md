@@ -47,8 +47,8 @@ Physics implemented with Minecraft's public constants: entity force model (Y→X
 
 ## Verification
 
-- 78 Rust tests (`voxel-core`) + 6 renderer/LiDAR golden tests (`voxel-view`): fluid truth tables, 15-cell power decay, NOT/NOR gate tables, RS latch memory, ring-oscillator period, snapshot replay under oscillation, DDA vs brute force, scale-2 worldgen/physics/snapshot.
-- 53 pytest: env contract, recorder/replay hash match, render golden (seg/depth/normals bit-exact vs analytic DDA), LiDAR golden range, no-clip property tests (5 seeds × 3000 ticks, terminal-velocity fall onto a 1-cell platform).
+- Rust workspace tests cover the physics truth tables, circuit memory and timing, snapshot replay, DDA renderer/LiDAR goldens, PyO3 bindings, and batch interfaces.
+- The complete pytest suite covers the env contract, recorder/replay hashes, render and LiDAR goldens, task/expert behavior, data pipelines, VQA, web protocols, and no-clip properties.
 - Oracle experts: 13 gated tasks ≥ 0.95 success over 20 episodes; `mine_diamond` tracked (0.80) without a hard gate.
 - Determinism: 20k-tick double run, identical final hash.
 
@@ -76,16 +76,25 @@ Learned dynamics largely survive the 2× refinement — the finer-cut world does
 
 ```bash
 # Rust stable + Python 3.11
-pip install maturin pytest gymnasium numpy pyarrow fastapi "uvicorn[standard]"
-# equivalently: pip install -e "python[dev]"
+pip install --index-url https://download.pytorch.org/whl/cpu torch
+pip install -e "python[dev]"
 maturin develop --release -m crates/voxel-py/Cargo.toml   # or scripts/build_dev.bat
-cargo test --workspace && pytest python/tests -q          # also what .github/workflows/ci.yml runs
+cargo test --workspace --release && pytest python/tests -q
 
 python -m voxelgym.experts --task smelt_iron --episodes 20   # oracle gate
 python bench/determinism.py --seed 42 --ticks 20000
 python bench/throughput.py --envs 64 --ticks 100000
 python web/server.py                                          # live demo
 ```
+
+## Testing and coverage
+
+CI keeps the stable correctness suites and independently gates production line
+coverage at 80% for the Rust workspace, Python plus the web server, and browser
+`app.js`. All three reports include branch coverage without using it as a gate;
+HTML and machine-readable reports are retained as GitHub Actions artifacts even
+when a threshold fails. See [docs/testing.md](docs/testing.md) for the exact local
+commands, coverage scope, and artifact layout.
 
 ## Layout
 

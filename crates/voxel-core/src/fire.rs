@@ -144,6 +144,7 @@ pub fn tick_fire(world: &mut World, dirty: &[(i32, i32, i32)]) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::tick::{step, Action};

@@ -183,6 +183,7 @@ fn land(world: &mut World, block: u16, x: i32, y: i32, z: i32) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::tick::{step, Action};

@@ -59,3 +59,35 @@ impl Chunk {
         self.blocks[Self::idx(lx, y, lz)] = cell;
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_chunk_uses_scale_one_dimensions() {
+        let chunk = Chunk::empty();
+
+        assert_eq!(chunk.h, CHUNK_Y);
+        assert_eq!(chunk.blocks.len(), CHUNK_VOL);
+        assert!(!chunk.generated);
+        assert!(!chunk.touched);
+    }
+
+    #[test]
+    fn custom_height_storage_keeps_each_axis_distinct() {
+        let mut chunk = Chunk::with_height(2);
+
+        chunk.set(1, 0, 0, 11);
+        chunk.set(0, 1, 0, 22);
+        chunk.set(0, 0, 1, 33);
+        chunk.set(CHUNK_X - 1, 1, CHUNK_Z - 1, 44);
+
+        assert_eq!(chunk.blocks.len(), CHUNK_X * 2 * CHUNK_Z);
+        assert_eq!(chunk.get(1, 0, 0), 11);
+        assert_eq!(chunk.get(0, 1, 0), 22);
+        assert_eq!(chunk.get(0, 0, 1), 33);
+        assert_eq!(chunk.get(CHUNK_X - 1, 1, CHUNK_Z - 1), 44);
+    }
+}

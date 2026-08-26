@@ -291,6 +291,7 @@ fn reaction_or_cell(cur: u16, f: Fluid, fid: u16, level: u16) -> Option<u16> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::tick::{step, Action};

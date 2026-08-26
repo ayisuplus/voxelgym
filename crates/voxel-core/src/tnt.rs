@@ -115,6 +115,7 @@ fn explode(world: &mut World, bx: i32, by: i32, bz: i32) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::tick::{step, Action};

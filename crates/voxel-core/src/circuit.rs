@@ -316,6 +316,7 @@ pub fn on_cell_changed(world: &mut World, x: i32, y: i32, z: i32, old: u16, new:
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::tick::{step, Action};

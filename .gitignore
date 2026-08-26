@@ -3,6 +3,11 @@
 *.pyc
 __pycache__/
 .pytest_cache/
+.coverage
+.coverage.*
+coverage/
+*.profraw
+node_modules/
 .venv/
 data/
 *.egg-info/
