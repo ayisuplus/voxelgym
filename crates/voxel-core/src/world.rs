@@ -17,9 +17,11 @@ use crate::recipe::FurnaceState;
 use crate::rng::Rng;
 use crate::worldgen::{apply_scenario, generate_chunk, Preset, ScenarioSpec};
 
-/// Snapshot format v6: per-chunk `touched` flag byte. v5 snapshots still
-/// load (every chunk conservatively marked touched).
-pub const SNAPSHOT_VERSION: u32 = 6;
+/// Snapshot format v7: falling blocks persist their accumulated fall distance.
+/// v6 added per-chunk `touched` flags; v5 and v6 snapshots remain readable.
+pub const SNAPSHOT_VERSION: u32 = 7;
+
+const FALLING_DISTANCE_SNAPSHOT_VERSION: u32 = 7;
 
 /// Fixed-seed xxh3 hasher for world-state maps/sets. Unlike `RandomState`,
 /// iteration order is stable across processes (determinism hygiene), and it
@@ -480,6 +482,7 @@ impl World {
             for v in f.vel {
                 put_f64(buf, v);
             }
+            put_f64(buf, f.fall_dist);
         }
         let mut sched: Vec<(i32, i32, i32, u64)> = self.scheduled_falls.clone();
         sched.sort_unstable();
@@ -706,7 +709,11 @@ impl World {
             for v in vel.iter_mut() {
                 *v = r.f64()?;
             }
-            let fall_dist = r.f64()?;
+            let fall_dist = if version >= FALLING_DISTANCE_SNAPSHOT_VERSION {
+                r.f64()?
+            } else {
+                0.0
+            };
             falling.push(FallingBlock { id, block, pos, vel, fall_dist });
         }
         let nsched = r.u32()? as usize;
@@ -741,6 +748,7 @@ impl World {
             let due = r.u64()?;
             pending_booms.push((x, y, z, due));
         }
+        r.finish()?;
 
         let mut agent = Agent::new(pos, physics.scale);
         agent.vel = vel;
@@ -980,11 +988,51 @@ impl<'a> Reader<'a> {
             self.take(4)?.try_into().unwrap(),
         )))
     }
+
+    fn finish(&self) -> Result<(), String> {
+        if self.pos == self.buf.len() {
+            Ok(())
+        } else {
+            Err("snapshot has trailing bytes".into())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn world_with_falling_distance(fall_dist: f64) -> World {
+        let mut world = World::new(7, Preset::Void, Vec::new());
+        world.falling.push(FallingBlock {
+            id: 1,
+            block: SAND,
+            pos: [5.5, 12.5, 5.5],
+            vel: [0.0, -0.25, 0.0],
+            fall_dist,
+        });
+        world
+    }
+
+    fn legacy_falling_snapshot(version: u32) -> Vec<u8> {
+        let fall_dist = 1234.567_89_f64;
+        let mut world = world_with_falling_distance(fall_dist);
+        // Keep the fixture independent of the v5/v6 per-chunk touched-byte
+        // difference; this test targets their shared missing falling field.
+        world.chunks.clear();
+        let mut bytes = world.snapshot();
+        bytes[4..8].copy_from_slice(&version.to_le_bytes());
+
+        let encoded = fall_dist.to_bits().to_le_bytes();
+        let offsets: Vec<usize> = bytes
+            .windows(encoded.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == encoded).then_some(offset))
+            .collect();
+        assert_eq!(offsets.len(), 1, "fixture fall distance must be unique");
+        bytes.drain(offsets[0]..offsets[0] + encoded.len());
+        bytes
+    }
 
     #[test]
     fn bounds_semantics() {
@@ -1030,5 +1078,68 @@ mod tests {
         assert_eq!(w2.hash(), h1);
         // byte-identical re-serialization
         assert_eq!(w2.snapshot(), bytes);
+    }
+
+    #[test]
+    fn hash_distinguishes_falling_distance() {
+        let near = world_with_falling_distance(0.5);
+        let far = world_with_falling_distance(4.5);
+
+        assert_ne!(near.hash(), far.hash());
+    }
+
+    #[test]
+    fn new_snapshots_use_version_seven() {
+        let bytes = World::new(7, Preset::Void, Vec::new()).snapshot();
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+
+        assert_eq!(version, 7);
+    }
+
+    #[test]
+    fn legacy_falling_snapshots_restore_with_conservative_distance() {
+        for version in [5, 6] {
+            let restored = World::restore(&legacy_falling_snapshot(version)).unwrap();
+
+            assert_eq!(restored.falling.len(), 1);
+            assert_eq!(restored.falling[0].fall_dist, 0.0);
+        }
+    }
+
+    #[test]
+    fn restore_rejects_trailing_snapshot_bytes() {
+        let mut bytes = World::new(7, Preset::Void, Vec::new()).snapshot();
+        bytes.push(0xA5);
+
+        assert_eq!(
+            World::restore(&bytes).err().as_deref(),
+            Some("snapshot has trailing bytes")
+        );
+    }
+
+    #[test]
+    fn active_falling_snapshot_preserves_future_simulation() {
+        let mut original = World::new(7, Preset::Void, Vec::new());
+        original.set_block(5, 5, 5, STONE);
+        original.set_block(5, 12, 5, SAND);
+        original.agent.pos = [5.5, 6.0, 5.5];
+        let idle = crate::tick::Action::default();
+        for _ in 0..6 {
+            crate::tick::step(&mut original, &idle);
+        }
+        assert_eq!(original.falling.len(), 1);
+        assert!(original.falling[0].fall_dist > 0.0);
+
+        let bytes = original.snapshot();
+        let mut restored = World::restore(&bytes).unwrap();
+        assert_eq!(restored.snapshot(), bytes);
+        assert_eq!(restored.hash(), original.hash());
+
+        for _ in 0..60 {
+            crate::tick::step(&mut original, &idle);
+            crate::tick::step(&mut restored, &idle);
+            assert_eq!(restored.hash(), original.hash());
+        }
+        assert_eq!(restored.agent.hp, original.agent.hp);
     }
 }
