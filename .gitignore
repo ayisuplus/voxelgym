@@ -9,6 +9,8 @@ coverage/
 *.profraw
 node_modules/
 .venv/
+.uv-cache/
 data/
+runs/
 *.egg-info/
 dist/

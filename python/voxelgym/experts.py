@@ -1134,6 +1134,9 @@ def run_episode(
     trace_level: str = "full",
     dt_numerator: int = 1,
     dt_denominator: int = 20,
+    physics: dict[str, float] | None = None,
+    lidar: dict | None = None,
+    max_steps: int | None = None,
 ):
     from .recorder import CausalRecorder, Recorder
 
@@ -1145,10 +1148,12 @@ def run_episode(
         task=task,
         seed=seed,
         render=render,
+        lidar=lidar,
         scale=scale,
         dt_numerator=dt_numerator,
         dt_denominator=dt_denominator,
         spacetime=record_format == 2,
+        physics=physics,
     )
     initial_observation, _ = env.reset(seed=seed)
     expert = make_expert(task_name, task, seed=seed)
@@ -1166,7 +1171,7 @@ def run_episode(
             dt_numerator=dt_numerator,
             dt_denominator=dt_denominator,
             render_every=(1 if render is True else int(render) if render else 0),
-            lidar=None,
+            lidar=lidar,
             spacetime=True,
         )
         rec.start(env, initial_observation)
@@ -1216,6 +1221,8 @@ def run_episode(
         steps += 1
         if term or trunc:
             success = bool(term) and not env.world.dead()
+            break
+        if max_steps is not None and steps >= max_steps:
             break
     final_hash = env.world.hash()
     path = rec.save(final_hash) if rec else None

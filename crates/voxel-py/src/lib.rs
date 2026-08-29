@@ -1241,6 +1241,21 @@ impl PyWorld {
             .ok_or_else(|| PyValueError::new_err(format!("unknown physics field '{key}'")))
     }
 
+    /// Effective episode physics after immutable clock and spatial transforms.
+    fn physics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let result = PyDict::new(py);
+        for key in voxel_core::physics::Physics::FIELDS {
+            result.set_item(
+                *key,
+                self.world
+                    .physics()
+                    .get(key)
+                    .expect("Physics::FIELDS must contain readable fields"),
+            )?;
+        }
+        Ok(result)
+    }
+
     /// Advance one tick. Action = 10-tuple per the gym contract.
     fn step(&mut self, action: ActionTuple) {
         let a = to_action(&action);

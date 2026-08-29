@@ -117,6 +117,7 @@ class EnvSnapshot:
     native_trace_state: bytes | None = None
     native_intervention_cursor: int = 0
     intervention_cursor: int = 0
+    physics_config: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         if self.intervention_cursor < 0 or self.native_intervention_cursor < 0:
@@ -178,6 +179,7 @@ class EnvSnapshot:
             "native_trace_state_name": native_trace_state_name,
             "native_intervention_cursor": int(self.native_intervention_cursor),
             "intervention_cursor": int(self.intervention_cursor),
+            "physics_config": _encode(self.physics_config),
         }
         metadata_bytes = json.dumps(
             metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -216,12 +218,15 @@ class EnvSnapshot:
                 task_state = _decode(metadata["task_state"])
                 random_state = _decode(metadata["np_random_state"])
                 last_trace = _decode(metadata.get("last_trace"))
+                physics_config = _decode(metadata.get("physics_config"))
                 if task_state is not None and not isinstance(task_state, dict):
                     raise ValueError("EnvSnapshot task state is not a mapping")
                 if not isinstance(random_state, dict):
                     raise ValueError("EnvSnapshot random state is not a mapping")
                 if last_trace is not None and not isinstance(last_trace, dict):
                     raise ValueError("EnvSnapshot last trace is not a mapping")
+                if physics_config is not None and not isinstance(physics_config, dict):
+                    raise ValueError("EnvSnapshot physics config is not a mapping")
                 trace_state_name = metadata.get("native_trace_state_name")
                 if trace_state_name is not None and not isinstance(trace_state_name, str):
                     raise ValueError("EnvSnapshot native trace state name is invalid")
@@ -276,6 +281,11 @@ class EnvSnapshot:
                     ),
                     native_intervention_cursor=native_intervention_cursor,
                     intervention_cursor=intervention_cursor,
+                    physics_config=(
+                        None
+                        if physics_config is None
+                        else {str(key): float(value) for key, value in physics_config.items()}
+                    ),
                 )
         except ValueError:
             raise

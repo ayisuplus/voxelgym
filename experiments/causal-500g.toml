@@ -1,0 +1,70 @@
+[environment]
+scale = 1.0
+dt_numerator = 1
+dt_denominator = 20
+render_every = 1
+spacetime = true
+lidar = { channels = 16, azimuth = 256, min_elev = -20.0, max_elev = 10.0, max_range = 48.0, every = 1 }
+
+[dataset]
+root = "data/causal-500g"
+target_gib = 500.0
+shard_gib = 1.0
+segment_steps = 256
+window_steps = 64
+train_fraction = 0.8
+validation_fraction = 0.1
+expert_fraction = 0.5
+mixed_fraction = 0.3
+paired_fraction = 0.2
+epsilon_values = [0.05, 0.15, 0.30]
+
+[generation]
+workers = 16
+worker_candidates = [8, 16, 24]
+benchmark_trials = 3
+max_memory_fraction = 0.70
+seed0 = 1000000
+trace_level = "full"
+replay_sample_rate = 0.01
+counterfactual_steps = 256
+rollout_steps = 256
+domain_randomization_fraction = 0.30
+physics_ranges = { gravity = [0.064, 0.096], walk_speed = [0.08, 0.12], water_period = [4.0, 6.0], lava_period = [25.0, 35.0] }
+
+[model]
+kind = "transformer"
+objective = "counterfactual"
+latent = 1024
+hidden = 512
+d_model = 768
+layers = 12
+heads = 12
+mlp_dim = 3072
+context = 64
+mask_steps = 16
+horizons = [1, 4, 8, 16]
+modalities = ["rgb", "depth", "normals", "lidar_range", "voxels", "pose", "inventory", "action"]
+
+[training]
+steps = 100000
+microbatch = 8
+gradient_accumulation = 8
+loader_workers = 8
+prefetch_factor = 4
+learning_rate = 0.0003
+weight_decay = 0.05
+warmup_fraction = 0.02
+gradient_clip = 1.0
+checkpoint_every = 1000
+evaluate_every = 2000
+log_every = 50
+evaluation_batches = 32
+device = "auto"
+dtype = "bf16"
+deterministic = false
+
+[run]
+output_dir = "runs"
+name = "causal-transformer-500g"
+seed = 0

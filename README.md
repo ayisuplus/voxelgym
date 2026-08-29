@@ -118,6 +118,55 @@ python bench/throughput.py --envs 64 --ticks 100000
 python web/server.py                                          # live demo
 ```
 
+## Causal world-model research loop
+
+The local-first research path keeps Episode Bundle v2 and World Snapshot v8 as
+the replay authority. It derives a checksum-bound Dataset Manifest v1 and
+memory-mapped Training Pack v1. Each sample aligns 65 boundary Agent Views with
+64 action/intervention transitions and masks future states, so long-horizon
+predictions receive declared controls without seeing their outcomes. Oracle
+events, deltas, hashes, snapshots, and task truth remain labels only.
+
+The model ladder is RSSM, an apples-to-apples Dynamics/Causal/Counterfactual
+Transformer ablation, and a Temporal JEPA baseline. The three ~100M Transformer
+arms share architecture and initialization; only their active supervision
+changes. A build-time, run-seed-independent Eval Suite makes task/domain and
+paired comparisons identical across arms.
+
+```powershell
+# 100 GiB pilot: benchmarks 8/16/24 generators, produces bundles + pack.
+python -m voxelgym.datasets build-causal --config experiments/causal-pilot.toml
+
+# Native-Windows eager BF16 training; metrics, TensorBoard and atomic resume
+# points are written below runs/.
+python -m voxelgym.train --config experiments/causal-pilot.toml
+python -m voxelgym.evaluate --run runs/<run-directory>
+
+# Other equal-compute arms; --seed is written into the resolved config.
+python -m voxelgym.train --config experiments/rssm-pilot.toml --seed 0
+python -m voxelgym.train --config experiments/dynamics-transformer-pilot.toml --seed 0
+python -m voxelgym.train --config experiments/causal-transformer-pilot.toml --seed 0
+python -m voxelgym.train --config experiments/jepa-pilot.toml --seed 0
+
+# Generate the independent scale/clock/gravity/fluid OOD pack, then evaluate
+# the same frozen checkpoint on it.
+python -m voxelgym.datasets build-causal --config experiments/causal-ood.toml
+python -m voxelgym.evaluate --run runs/<run-directory> `
+  --pack data/causal-ood/pack/manifest.json
+```
+
+Formal evaluation refuses a missing test split and never falls back to training
+data. Repeating `--run` reports t-95% intervals and matched-seed
+Causal−Dynamics / Counterfactual−Causal differences. It also reports frozen
+linear probes, typed-edge and pair metrics, reconstruction quality, and JEPA
+effective rank.
+
+The 500 GiB configuration fixes the source mix at 50% oracle expert, 30%
+epsilon-mixed expert, and 20% paired interventions, with exactly 30% of source
+trajectories domain-randomized per ten-trajectory production cycle. Do not run
+it until the pilot replay, distribution, utilization, memory, causal-increment,
+and short-horizon gates pass. See [the causal platform guide](docs/causal-world-model.md).
+
 ## Testing and coverage
 
 CI keeps the stable correctness suites and independently gates production line

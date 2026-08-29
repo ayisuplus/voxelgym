@@ -119,6 +119,7 @@ def _snapshot_equal(left: EnvSnapshot, right: EnvSnapshot) -> bool:
         or left.native_trace_state != right.native_trace_state
         or left.native_intervention_cursor != right.native_intervention_cursor
         or left.intervention_cursor != right.intervention_cursor
+        or left.physics_config != right.physics_config
     ):
         return False
     for first, second in (

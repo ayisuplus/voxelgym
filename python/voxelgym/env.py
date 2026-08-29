@@ -14,6 +14,7 @@ from __future__ import annotations
 from copy import deepcopy
 import inspect
 import json
+import math
 import operator
 from typing import Any, Literal
 
@@ -29,6 +30,24 @@ from .task_state import EnvSnapshot, RewardOutcome, StatefulTask, clone_sensor_c
 ACTION_KEYS = ("move", "jump", "sneak", "yaw", "pitch", "mine", "place", "use", "hotbar", "craft")
 
 RENDER_RES = 128
+
+
+def _canonical_physics_config(physics: dict[str, float] | None) -> dict[str, float] | None:
+    if physics is None:
+        return None
+    if not isinstance(physics, dict):
+        raise TypeError("physics must be a mapping or None")
+    result: dict[str, float] = {}
+    for key, raw_value in physics.items():
+        if not isinstance(key, str):
+            raise TypeError("physics field names must be strings")
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise TypeError(f"physics field {key!r} must be numeric")
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError(f"physics field {key!r} must be finite")
+        result[key] = value
+    return dict(sorted(result.items()))
 
 
 def action_space() -> spaces.Dict:
@@ -143,6 +162,7 @@ class VoxelGymEnv(gym.Env):
         dt_denominator: int = 20,
         spacetime: bool = False,
         semantic_regions: list[tuple[int, ...]] | None = None,
+        physics: dict[str, float] | None = None,
     ):
         super().__init__()
         _validate_task_reward_contract(task)
@@ -154,6 +174,7 @@ class VoxelGymEnv(gym.Env):
         self._dt_denominator = int(dt_denominator)
         self._spacetime = bool(spacetime)
         self._semantic_regions = deepcopy(semantic_regions)
+        self._physics = _canonical_physics_config(physics)
         if render is True:
             render = 1
         self._render_every = int(render) if render else 0
@@ -208,6 +229,7 @@ class VoxelGymEnv(gym.Env):
             dt_numerator=self._dt_numerator,
             dt_denominator=self._dt_denominator,
             semantic_regions=semantic_regions,
+            physics=deepcopy(self._physics),
         )
         self._last_frames = None
         self._last_scan = None
@@ -222,7 +244,14 @@ class VoxelGymEnv(gym.Env):
         if self._task is not None:
             self._task.on_reset(self._w, self.np_random)
         observation = self._obs()
-        return observation, {"seed": self._episode_seed, "clock": self.world.clock()}
+        return observation, {
+            "seed": self._episode_seed,
+            "clock": self.world.clock(),
+            "physics_config": deepcopy(self._physics),
+            "physics": dict(self.world.physics()),
+            "scale": self._scale,
+            "sensor_profile": self.sensor_profile(),
+        }
 
     def step(self, action: dict[str, Any]):
         return self._transition(action)
@@ -498,6 +527,7 @@ class VoxelGymEnv(gym.Env):
                 self.world
             ),
             intervention_cursor=self._intervention_cursor,
+            physics_config=deepcopy(self._physics),
         )
 
     def restore(self, snapshot: EnvSnapshot) -> None:
@@ -518,6 +548,7 @@ class VoxelGymEnv(gym.Env):
             scale=self._scale,
             dt_numerator=self._dt_numerator,
             dt_denominator=self._dt_denominator,
+            physics=deepcopy(snapshot.physics_config),
         )
         candidate_world.restore(snapshot.world_snapshot)
         _restore_native_trace_state(candidate_world, snapshot.native_trace_state)
@@ -557,6 +588,7 @@ class VoxelGymEnv(gym.Env):
         self._scale = candidate_scale
         self._dt_numerator = candidate_dt_numerator
         self._dt_denominator = candidate_dt_denominator
+        self._physics = deepcopy(snapshot.physics_config)
         self._render_every = candidate_render_every
         self._lidar = candidate_lidar
         self._lidar_every = candidate_lidar_every
@@ -596,6 +628,7 @@ class VoxelGymEnv(gym.Env):
             dt_denominator=self._dt_denominator,
             spacetime=self._spacetime,
             semantic_regions=deepcopy(self._semantic_regions),
+            physics=deepcopy(self._physics),
         )
         # Gymnasium initializes np_random lazily; restore then replaces its
         # state without invoking scenario/on_reset side effects.
@@ -776,6 +809,9 @@ class VoxelGymEnv(gym.Env):
                 )
         state.update(
             {
+                "physics_config": deepcopy(self._physics),
+                "physics": dict(self.world.physics()),
+                "sensor_profile": self.sensor_profile(),
                 "world_hash": self.world.hash(),
                 "world_snapshot": bytes(self.world.snapshot()),
                 "task_state": (
@@ -818,6 +854,16 @@ class VoxelGymEnv(gym.Env):
             }
         )
         return state
+
+    def sensor_profile(self) -> dict[str, Any]:
+        """Serializable observation cadence and modality configuration."""
+
+        return {
+            "render_every": self._render_every,
+            "lidar": deepcopy(self._lidar),
+            "spacetime": self._spacetime,
+            "modalities": sorted(self.observation_space.spaces),
+        }
 
     def _scan(self):
         if self._last_scan is None or self.world.tick() % self._lidar_every == 0:

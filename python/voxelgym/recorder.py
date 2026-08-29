@@ -181,6 +181,8 @@ class CausalRecorder:
         lidar: dict[str, Any] | None = None,
         spacetime: bool | None = None,
         checkpoint_every: int = CKPT_EVERY,
+        stem: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.trace_level = trace_level
         self.branch_id = int(branch_id)
@@ -188,23 +190,26 @@ class CausalRecorder:
             None if spacetime is None else bool(spacetime)
         )
         self.checkpoint_every = max(1, int(checkpoint_every))
+        bundle_metadata = {
+            "code_version": code_version(),
+            "scale": float(scale),
+            "render_every": int(render_every),
+            "lidar": lidar,
+            "spacetime": False if spacetime is None else bool(spacetime),
+            "clock": {
+                "dt_numerator": int(dt_numerator),
+                "dt_denominator": int(dt_denominator),
+            },
+        }
+        bundle_metadata.update(metadata or {})
         self.writer = EpisodeBundleWriter(
             out_dir,
             task=task,
             seed=seed,
             trace_level=trace_level,
             branch_id=branch_id,
-            metadata={
-                "code_version": code_version(),
-                "scale": float(scale),
-                "render_every": int(render_every),
-                "lidar": lidar,
-                "spacetime": False if spacetime is None else bool(spacetime),
-                "clock": {
-                    "dt_numerator": int(dt_numerator),
-                    "dt_denominator": int(dt_denominator),
-                },
-            },
+            stem=stem,
+            metadata=bundle_metadata,
         )
         self._env = None
         self._expected_tick: int | None = None
@@ -252,6 +257,9 @@ class CausalRecorder:
         self.writer.metadata.update(
             {
                 "scale": float(oracle["scale"]),
+                "physics_config": oracle.get("physics_config"),
+                "physics": oracle.get("physics"),
+                "sensor_profile": oracle.get("sensor_profile"),
                 "render_every": int(getattr(env, "_render_every", 0)),
                 "lidar": getattr(env, "_lidar", None),
                 "spacetime": env_spacetime,

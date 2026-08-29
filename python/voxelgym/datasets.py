@@ -4,6 +4,7 @@ and a torch loader.
 CLI:
   python -m voxelgym.datasets export --task collect_log --episodes 50 --render 1 --out data/v1
   python -m voxelgym.datasets baseline --data data/v1
+  python -m voxelgym.datasets build-causal --config experiments/causal-pilot.toml
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ FRAME = 128
 
 
 def export(task: str, episodes: int, out_dir: str, render: int = 1, seed0: int = 0, epsilon: float = 0.0,
-           scale: float = 1.0, format_version: int = 1):
+           scale: float = 1.0, format_version: int = 1,
+           physics: dict[str, float] | None = None):
     from .experts import run_episode
 
     os.makedirs(out_dir, exist_ok=True)
@@ -35,6 +37,8 @@ def export(task: str, episodes: int, out_dir: str, render: int = 1, seed0: int =
             "epsilon": epsilon,
             "scale": scale,
         }
+        if physics is not None:
+            kwargs["physics"] = physics
         if format_version != 1:
             kwargs["record_format"] = format_version
         ok, steps, h, path = run_episode(task, seed0 + i, **kwargs)
@@ -119,13 +123,14 @@ class VoxelSequenceDataset:
 
 
 def baseline(data: str, steps: int = 50_000, batch: int = 32, seq_len: int = 16, lr: float = 3e-4,
-             limit_steps: int | None = None, channels: str = "rgb"):
+             limit_steps: int | None = None, channels: str = "rgb",
+             device: str = "auto", dtype: str = "bf16"):
     """RSSM-lite latent-prediction baseline vs copy-last-latent. See
     baseline.py for the model. Prints the acceptance ratio."""
     from .baseline import run_baseline
 
     return run_baseline(data, steps=steps, batch=batch, seq_len=seq_len, lr=lr,
-                        limit_steps=limit_steps, channels=channels)
+                        limit_steps=limit_steps, channels=channels, device=device, dtype=dtype)
 
 
 def main(argv=None) -> int:
@@ -148,6 +153,13 @@ def main(argv=None) -> int:
     b.add_argument("--limit-steps", type=int, default=None, help="dev override for a quick run")
     b.add_argument("--channels", choices=["rgb", "rgbd"], default="rgb",
                    help="ablation axis: rgbd adds the metric-depth channel")
+    b.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    b.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
+    c = sub.add_parser("build-causal")
+    c.add_argument("--config", required=True, help="TOML experiment configuration")
+    c.add_argument("--skip-worker-benchmark", action="store_true")
+    c.add_argument("--pack-only", action="store_true")
+    c.add_argument("--no-pack", action="store_true")
     args = ap.parse_args(argv)
 
     if args.cmd == "export":
@@ -156,9 +168,27 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "baseline":
         ratio = baseline(args.data, steps=args.steps, batch=args.batch, seq_len=args.seq_len,
-                         limit_steps=args.limit_steps, channels=args.channels)
+                         limit_steps=args.limit_steps, channels=args.channels,
+                         device=args.device, dtype=args.dtype)
         print(f"acceptance: model/copy MSE ratio = {ratio:.3f} (need < 0.9)")
         return 0 if ratio < 0.9 else 1
+    if args.cmd == "build-causal":
+        if args.pack_only and args.no_pack:
+            ap.error("--pack-only and --no-pack are mutually exclusive")
+        from .causal_data import build_causal_dataset, build_pack_only
+        from .config import ResearchConfig
+
+        config = ResearchConfig.from_toml(args.config)
+        if args.pack_only:
+            result = {"training_pack_manifest": str(build_pack_only(config))}
+        else:
+            result = build_causal_dataset(
+                config,
+                benchmark_workers=not args.skip_worker_benchmark,
+                build_pack=not args.no_pack,
+            )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
     return 2
 
 

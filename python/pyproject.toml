@@ -24,6 +24,7 @@ dev = [
 ]
 ml = [
     "torch",
+    "tensorboard",
 ]
 
 [tool.pytest.ini_options]

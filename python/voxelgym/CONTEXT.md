@@ -5,7 +5,7 @@ VoxelGym Python owns the training-environment boundary above Voxel Core: task st
 ## Episode state
 
 **Env Snapshot**:
-A complete Python episode checkpoint used for exact continuation. It contains World Snapshot bytes, versioned task state, the Gym `np_random` state, episode seed, terminated/truncated bookkeeping, the most recent structured reward outcome, render and LiDAR caches, the tick at which each cached sensor value was sampled, the serializable-intervention cursor, and optional native trace bookkeeping when the loaded binding exposes that capability. Restore does not rerun scenario generation or task reset hooks. A World Snapshot alone is insufficient when task, RNG, reward, intervention identity, trace continuity, or sensor scheduling can affect subsequent Gym outputs.
+A complete Python episode checkpoint used for exact continuation. It contains World Snapshot bytes, versioned task state, the Gym `np_random` state, episode seed, terminated/truncated bookkeeping, the most recent structured reward outcome, render and LiDAR caches, the tick at which each cached sensor value was sampled, the requested physics overrides, the serializable-intervention cursor, and optional native trace bookkeeping when the loaded binding exposes that capability. Restore does not rerun scenario generation or task reset hooks. A World Snapshot alone is insufficient when task, RNG, reward, intervention identity, trace continuity, physics configuration, or sensor scheduling can affect subsequent Gym outputs.
 _Avoid_: World Snapshot, observation snapshot, dataset checkpoint
 
 Task state is JSON-safe and versioned through `state_dict()` / `load_state_dict()`. It covers every mutable task field. Reward evaluation is a pure function of the post-transition world, the pre-reward task state, and a read-only view of that transition's events: it returns a `RewardOutcome` containing total, named components, termination reason, selectively matched numeric `evidence_event_ids`, separate semantic `evidence_labels`, and explicit task-state updates. Labels are task assertions and never masquerade as World Event IDs. `Env.step()` commits updates only after evaluation while retaining the Gymnasium scalar reward API. Reward evaluation must not mutate either World State or Task State; task-induced world changes belong to the explicit intervention phase.
@@ -35,6 +35,34 @@ An immutable `.vxbundle` directory for one recorded episode or branch. It contai
 
 Transition IDs are unique within a bundle. Every transition matches the manifest branch, advances exactly one tick, chains contiguously in table order, chains adjacent hashes whenever both are present, carries Agent and Oracle payloads, and never claims a future sensor sample. Each transition also stores the canonical ordered intervention specs and the boundary between caller-supplied and task-generated specs; replay injects only the former, regenerates the latter from restored Task State, and requires the combined sequence to match exactly. The legacy `swap` field remains a read-only compatibility side channel, not the source of truth. Event IDs are unique, every event references an existing transition, parent IDs reference existing non-future events on the same branch, and the causal graph is acyclic. A recorder starting from an already-running branch reads the allowed ancestry from the initial native Trace State; the manifest then stores exactly the subset actually referenced as `external_parent_ids`. Missing parents are never auto-promoted into boundary ancestors. Every delta references an existing event and transition. Per-transition event/delta counts bind the trace tables to their owning transitions. `TraceLevel::Off` requires absent hashes and empty event/delta tables; `Events` requires absent hashes and an empty delta table; `Full` requires both boundary hashes, exactly one action root, and exactly one matching World `tick_before → tick_after` delta per non-empty transition. A no-op action may have no additional state deltas, but the tick delta is never optional.
 
-World-model transition windows expose the first boundary's Agent/Oracle payloads only as inputs and the last boundary's payloads as explicit prediction targets. Factual/counterfactual pairs require identical pre-state views, identical action sequences, and exactly one explicitly recorded intervention side; differing actions are never mislabeled as an intervention effect.
+World-model windows align 65 boundary Agent Views with the 64 transitions
+between them. A random observed prefix is model input; target-side states are
+masked while the declared action and external-intervention controls remain
+available through each prediction horizon. Agent action and intervention use
+separate encoders and authority. Factual/counterfactual pairs require one
+identical pre-state, an identical action sequence, and exactly one explicitly
+recorded treatment intervention. Recorded post-intervention observations are
+targets only and differing actions are never mislabeled as an intervention
+effect. This query boundary is fixed by
+[ADR 0003](../../docs/adr/0003-observed-state-and-declared-control.md).
 
 The original v1 single-Parquet episode shard remains read-only input. Readers detect v1 or v2 and tag rows with their source version; they never rewrite a v1 shard as v2 implicitly. Episode Bundle tables are training artifacts derived from state and transitions, not inputs to Voxel Core physics.
+
+**Dataset Manifest v1** binds a causal-dataset build to immutable Episode
+Bundle v2 sources by SHA-256. It records task/seed split identity, policy arm,
+epsilon, physics/clock/scale/sensor configuration, pair/branch identity, byte
+size, final hash, and build configuration. Splits are assigned from task and
+episode seed, so adjacent windows from one episode cannot cross split
+boundaries.
+
+**Training Pack v1** is a non-authoritative, reproducible Parquet projection of
+Dataset Manifest sources. A row group stores one continuous segment and
+deduplicates cached render/LiDAR samples by sample tick; the loader memory-maps
+row groups and dynamically chooses shorter windows. Sensor sample IDs bind all
+ticks that share one cached frame into a masking group. Its model-input
+declaration is validated against a fixed Agent View plus declared-control
+allow-list. Oracle events, deltas, hashes, snapshots, Oracle View, and task
+truth are never model inputs, although event/delta targets, typed lag-bucketed
+causal edges, pair propagation, and reward effects are derived labels. The Pack
+also records a run-seed-independent test Eval Suite fingerprint with at most 64
+episode-balanced windows per task/domain and at most one window per episode.

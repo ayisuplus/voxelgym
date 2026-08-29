@@ -1,0 +1,44 @@
+# Apples-to-apples Transformer capacity control on the causal pilot Pack.
+[dataset]
+root = "data/causal-pilot"
+target_gib = 100.0
+shard_gib = 1.0
+segment_steps = 256
+window_steps = 64
+
+[model]
+kind = "transformer"
+objective = "dynamics"
+latent = 1024
+hidden = 512
+d_model = 768
+layers = 12
+heads = 12
+mlp_dim = 3072
+context = 64
+mask_steps = 16
+horizons = [1, 4, 8, 16]
+modalities = ["rgb", "depth", "normals", "lidar_range", "voxels", "pose", "inventory", "action"]
+
+[training]
+steps = 25000
+microbatch = 8
+gradient_accumulation = 8
+loader_workers = 8
+prefetch_factor = 4
+learning_rate = 0.0003
+weight_decay = 0.05
+warmup_fraction = 0.02
+gradient_clip = 1.0
+checkpoint_every = 1000
+evaluate_every = 2000
+log_every = 50
+evaluation_batches = 32
+device = "auto"
+dtype = "bf16"
+deterministic = false
+
+[run]
+output_dir = "runs"
+name = "dynamics-transformer-pilot"
+seed = 0

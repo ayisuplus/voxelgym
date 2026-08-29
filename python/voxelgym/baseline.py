@@ -151,13 +151,20 @@ def _load_split(data: str, seq_len: int, split: str, stride: int = 1, with_depth
 
 
 def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, limit_steps: int | None,
-                 stride: int = 4, channels: str = "rgb", transfer_data: str | None = None):
+                 stride: int = 4, channels: str = "rgb", transfer_data: str | None = None,
+                 device: str = "auto", dtype: str = "bf16"):
     """channels: "rgb" (3ch) or "rgbd" (4th channel = metric depth /96 cells).
     The ablation's whole point: identical data, windows, seed, steps — the
     ONLY difference is whether the encoder sees depth."""
     import torch
 
     assert channels in ("rgb", "rgbd")
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable")
+    torch_device = torch.device(device)
+    use_bf16 = dtype == "bf16" and torch_device.type == "cuda"
     want_depth = channels == "rgbd"
     torch.manual_seed(0)
     tr_rgb, tr_act, tr_wins, tr_dep = _load_split(data, seq_len, "train", stride, want_depth)
@@ -177,7 +184,7 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
         return rgb, dep, act
 
     in_ch = 4 if want_depth else 3
-    model = _build_model(in_ch)
+    model = _build_model(in_ch).to(torch_device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     mse = torch.nn.MSELoss()
     rng = np.random.default_rng(0)
@@ -188,13 +195,13 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
             x_in = np.concatenate([x_rgb.astype(np.float32) / 255.0, x_dep], axis=-1)
         else:
             x_in = x_rgb.astype(np.float32) / 255.0
-        x = torch.from_numpy(x_in).permute(1, 0, 4, 2, 3).float()
+        x = torch.from_numpy(x_in).permute(1, 0, 4, 2, 3).float().to(torch_device)
         T, B = x.shape[0], x.shape[1]
         x = torch.nn.functional.avg_pool2d(x.reshape(T * B, in_ch, 128, 128), 2)
         lat_on = model.online.encoder(x).reshape(T, B, -1)
         with torch.no_grad():
             lat_tg = model.target_encoder(x).reshape(T, B, -1)
-        a_ids = torch.from_numpy(pack_actions(act)).permute(1, 0)  # (T,B)
+        a_ids = torch.from_numpy(pack_actions(act)).permute(1, 0).to(torch_device)  # (T,B)
         return x, lat_on, lat_tg, a_ids
 
     n_steps = limit_steps or steps
@@ -209,10 +216,12 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
             for i in range(0, len(te_wins), batch):
                 idxs = te_wins[i : i + batch]
                 rgb, dep, act = grab(te_rgb, te_dep, te_act, te_wins, idxs)
-                _x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
-                pred = model.online(lat_on[:-1], a_ids[1:])
-                model_err += torch.nn.functional.mse_loss(pred, lat_tg[1:], reduction="sum").item()
-                copy_err += torch.nn.functional.mse_loss(lat_tg[:-1], lat_tg[1:], reduction="sum").item()
+                with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16,
+                                    enabled=use_bf16):
+                    _x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
+                    pred = model.online(lat_on[:-1], a_ids[1:])
+                    model_err += torch.nn.functional.mse_loss(pred, lat_tg[1:], reduction="sum").item()
+                    copy_err += torch.nn.functional.mse_loss(lat_tg[:-1], lat_tg[1:], reduction="sum").item()
                 n += lat_tg[1:].numel()
         model.train()
         return (model_err / n) / (copy_err / n), model_err / n, copy_err / n
@@ -221,10 +230,12 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
     for step in range(1, n_steps + 1):
         idxs = [tr_wins[i] for i in rng.integers(0, len(tr_wins), batch)]
         rgb, dep, act = grab(tr_rgb, tr_dep, tr_act, tr_wins, idxs)
-        x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
-        pred = model.online(lat_on[:-1], a_ids[1:])  # predict next latents
-        recon = model.decoder(lat_on.reshape(-1, lat_on.shape[-1]))
-        loss = mse(pred, lat_tg[1:]) + 0.5 * torch.nn.functional.mse_loss(recon, x[:, :3])
+        with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16,
+                            enabled=use_bf16):
+            x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
+            pred = model.online(lat_on[:-1], a_ids[1:])  # predict next latents
+            recon = model.decoder(lat_on.reshape(-1, lat_on.shape[-1]))
+            loss = mse(pred, lat_tg[1:]) + 0.5 * torch.nn.functional.mse_loss(recon, x[:, :3])
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -254,10 +265,12 @@ def run_baseline(data: str, steps: int, batch: int, seq_len: int, lr: float, lim
             for i in range(0, len(tr_wins2), batch):
                 idxs = tr_wins2[i : i + batch]
                 rgb, dep, act = grab(tr_rgb, tr_dep, tr_act, tr_wins2, idxs)
-                _x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
-                pred = model.online(lat_on[:-1], a_ids[1:])
-                me2 += torch.nn.functional.mse_loss(pred, lat_tg[1:], reduction="sum").item()
-                ce2 += torch.nn.functional.mse_loss(lat_tg[:-1], lat_tg[1:], reduction="sum").item()
+                with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16,
+                                    enabled=use_bf16):
+                    _x, lat_on, lat_tg, a_ids = forward_lat(rgb, dep, act)
+                    pred = model.online(lat_on[:-1], a_ids[1:])
+                    me2 += torch.nn.functional.mse_loss(pred, lat_tg[1:], reduction="sum").item()
+                    ce2 += torch.nn.functional.mse_loss(lat_tg[:-1], lat_tg[1:], reduction="sum").item()
                 n2 += lat_tg[1:].numel()
         ratio2 = (me2 / n2) / (ce2 / n2)
         print(f"TRANSFER ({transfer_data}): model {me2/n2:.5f} copy {ce2/n2:.5f} ratio {ratio2:.3f}")
